@@ -37,8 +37,9 @@ func startHelper(helper string, args []string, launchLog string) error {
 	return nil
 }
 
-// ensureHelperPrivilege creates the elevated scheduled task once, so later
-// starts do not ask for UAC.
+// ensureHelperPrivilege registers the elevated scheduled task once, so later
+// starts need no UAC prompt. schtasks caps its /TR argument at 261 characters,
+// which our command line exceeds, so the task is registered from PowerShell.
 func (a *app) ensureHelperPrivilege(helper string, args []string) error {
 	cmdline := buildCommandLine(helper, args)
 	marker := taskMarker(a.dir)
@@ -47,23 +48,41 @@ func (a *app) ensureHelperPrivilege(helper string, args []string) error {
 			return nil
 		}
 	}
-	// schtasks takes the whole command as one quoted argument; a small script
-	// keeps the quoting readable and runs elevated.
-	script := filepath.Join(a.dir, "tun-task.cmd")
-	body := fmt.Sprintf("@echo off\r\nschtasks /Create /TN \"%s\" /TR \"%s\" /SC ONCE /ST 00:00 /RL HIGHEST /F\r\n",
-		tunTaskName, strings.ReplaceAll(cmdline, `"`, `\"`))
-	if err := os.WriteFile(script, []byte(body), 0o644); err != nil {
+
+	// The script quotes everything once; PowerShell registers it elevated.
+	ps1 := filepath.Join(a.dir, "tun-task.ps1")
+	script := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
+$action = New-ScheduledTaskAction -Execute '%s' -Argument '%s'
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Highest
+Register-ScheduledTask -TaskName '%s' -Action $action -Principal $principal -Force | Out-Null
+`,
+		strings.ReplaceAll(helper, "'", "''"),
+		strings.ReplaceAll(buildArgumentLine(args), "'", "''"),
+		tunTaskName)
+	if err := os.WriteFile(ps1, []byte(script), 0o644); err != nil {
 		return err
 	}
-	ps := fmt.Sprintf("Start-Process -FilePath '%s' -Verb RunAs -Wait -WindowStyle Hidden", script)
-	if out, err := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps).CombinedOutput(); err != nil {
+	outer := fmt.Sprintf(
+		"$p = Start-Process -FilePath powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','%s' -Verb RunAs -Wait -PassThru -WindowStyle Hidden; exit $p.ExitCode",
+		ps1)
+	out, err := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", outer).CombinedOutput()
+	if err != nil {
 		return fmt.Errorf("%v：%s", err, strings.TrimSpace(string(out)))
 	}
-	if err := exec.Command("schtasks", "/Query", "/TN", tunTaskName).Run(); err != nil {
+	if exec.Command("schtasks", "/Query", "/TN", tunTaskName).Run() != nil {
 		return fmt.Errorf("计划任务未创建成功")
 	}
 	_ = os.WriteFile(marker, []byte(cmdline+"\n"), 0o600)
 	return nil
+}
+
+// buildArgumentLine quotes only the arguments, for New-ScheduledTaskAction.
+func buildArgumentLine(args []string) string {
+	parts := make([]string, 0, len(args))
+	for _, a := range args {
+		parts = append(parts, `"`+a+`"`)
+	}
+	return strings.Join(parts, " ")
 }
 
 // buildCommandLine quotes the helper call the way schtasks expects.

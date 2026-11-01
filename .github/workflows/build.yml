@@ -72,7 +72,7 @@ jobs:
             GOOS=darwin GOARCH=arm64 go build -o ../../resources/darwin-arm64/zju-connect-multitun ./cmd/multitun
             GOOS=darwin GOARCH=amd64 go build -o ../../resources/darwin-amd64/zju-connect-multitun ./cmd/multitun
           else
-            GOOS=windows GOARCH=amd64 go build -o ../../resources/windows-amd64/zju-connect-multitun.exe ./cmd/multitun
+            GOOS=windows GOARCH=amd64 go build -ldflags "-H=windowsgui" -o ../../resources/windows-amd64/zju-connect-multitun.exe ./cmd/multitun
           fi
           find ../../resources -maxdepth 2 -type f | sort
 

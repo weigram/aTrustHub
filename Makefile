@@ -43,7 +43,9 @@ fmt:
 
 ## helpers: 编译 third_party/zju-connect 里的 TUN 辅助程序到 resources/
 helpers:
-	cd third_party/zju-connect && $(GO) build -o ../../resources/zju-connect-multitun ./cmd/multitun
+	cd third_party/zju-connect && GOOS=darwin GOARCH=arm64 $(GO) build -o ../../resources/darwin-arm64/zju-connect-multitun ./cmd/multitun
+	cd third_party/zju-connect && GOOS=darwin GOARCH=amd64 $(GO) build -o ../../resources/darwin-amd64/zju-connect-multitun ./cmd/multitun
+	cd third_party/zju-connect && GOOS=windows GOARCH=amd64 $(GO) build -ldflags "-H=windowsgui" -o ../../resources/windows-amd64/zju-connect-multitun.exe ./cmd/multitun
 
 ## build: 打包成本机应用（macOS 上是 build/darwin-arm64/aTrustHub.app）
 build:
