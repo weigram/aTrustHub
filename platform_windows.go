@@ -17,18 +17,28 @@ func supportsSystemProxy() bool { return false }
 func supportsElevatedTUN() bool { return true }
 
 // helperCommand builds the command that runs the TUN helper as administrator.
-// Windows shows a UAC prompt for the elevated process.
+// Windows shows a UAC prompt for the elevated process. Every argument is
+// quoted, because the data directory usually contains a space
+// ("AppData\Roaming\aTrust Hub").
 func helperCommand(helper string, args []string, logFile *os.File) (*exec.Cmd, error) {
 	quoted := make([]string, 0, len(args))
 	for _, a := range args {
-		quoted = append(quoted, fmt.Sprintf("'%s'", strings.ReplaceAll(a, "'", "''")))
+		quoted = append(quoted, `"`+strings.ReplaceAll(a, `"`, `""`)+`"`)
 	}
-	ps := fmt.Sprintf(
-		"$p = Start-Process -FilePath '%s' -ArgumentList %s -Verb RunAs -PassThru -WindowStyle Hidden; $p.Id",
-		strings.ReplaceAll(helper, "'", "''"), strings.Join(quoted, ","))
+	argLine := strings.ReplaceAll(strings.Join(quoted, " "), "'", "''")
+	ps := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
+try {
+  $p = Start-Process -FilePath "%s" -ArgumentList '%s' -Verb RunAs -PassThru -WindowStyle Hidden
+  Write-Output ("started " + $p.Id)
+} catch {
+  Write-Output ("error " + $_.Exception.Message)
+  exit 1
+}`, strings.ReplaceAll(helper, `"`, `""`), argLine)
 	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	if logFile != nil {
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+	}
 	return cmd, nil
 }
 

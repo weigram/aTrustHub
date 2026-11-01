@@ -3,6 +3,7 @@
 package main
 
 import (
+	"time"
 	"errors"
 	"os/exec"
 	"strings"
@@ -71,3 +72,6 @@ func processAlive(pid int) bool {
 func terminateProcess(pid int) {
 	_ = syscall.Kill(pid, syscall.SIGTERM)
 }
+
+// dnsGuardInterval is how often the system DNS is re-asserted.
+const dnsGuardInterval = 2 * time.Second

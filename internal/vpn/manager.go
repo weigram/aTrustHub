@@ -714,22 +714,38 @@ func (m *Manager) restartAggregate() {
 	if !settings.AggregateEnabled {
 		return
 	}
-	addr := net.JoinHostPort(settings.ListenHost, fmt.Sprint(settings.AggregatePort))
-	p := proxy.New(proxy.Options{
-		Addr: addr,
-		Dial: m.Dial,
-		Logf: func(format string, args ...any) {
-			m.logf("[统一入口] "+format, args...)
-		},
-	})
-	if err := p.Start(); err != nil {
+	// A port another program holds must not disable the aggregate: walk to
+	// the next free one and report where it ended up.
+	var p *proxy.Server
+	var lastErr error
+	chosen := ""
+	for i := 0; i <= 20; i++ {
+		port := settings.AggregatePort + i
+		addr := net.JoinHostPort(settings.ListenHost, fmt.Sprint(port))
+		cand := proxy.New(proxy.Options{
+			Addr: addr,
+			Dial: m.Dial,
+			Logf: func(format string, args ...any) {
+				m.logf("[统一入口] "+format, args...)
+			},
+		})
+		if err := cand.Start(); err != nil {
+			lastErr = err
+			continue
+		}
+		p = cand
+		chosen = addr
+		break
+	}
+	if p == nil {
 		m.mu.Lock()
-		m.aggregateErr = err.Error()
+		m.aggregateErr = lastErr.Error()
 		m.mu.Unlock()
-		m.logf("统一入口监听失败：%v（端口可能被旧实例或别的程序占用，可在设置里换端口）", err)
+		m.logf("统一入口监听失败：%v（端口可能被旧实例或别的程序占用，可在设置里换端口）", lastErr)
 		m.changed()
 		return
 	}
+	addr := chosen
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -738,6 +754,9 @@ func (m *Manager) restartAggregate() {
 	}
 	m.aggregate = p
 	m.mu.Unlock()
+	if addr != net.JoinHostPort(settings.ListenHost, fmt.Sprint(settings.AggregatePort)) {
+		m.logf("统一入口原端口被占用，改用 %s", addr)
+	}
 	m.logf("统一入口在 %s 监听，分流模式：%s", addr, settings.Routing.Label())
 	m.changed()
 }

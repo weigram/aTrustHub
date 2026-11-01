@@ -3,6 +3,7 @@
 package main
 
 import (
+	"time"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -55,3 +56,7 @@ func processAlive(pid int) bool {
 func terminateProcess(pid int) {
 	_ = exec.Command("taskkill", "/PID", fmt.Sprintf("%d", pid), "/F").Run()
 }
+
+// dnsGuardInterval is how often the system DNS is re-asserted. Each check
+// spawns PowerShell on Windows, so it is less frequent.
+const dnsGuardInterval = 10 * time.Second

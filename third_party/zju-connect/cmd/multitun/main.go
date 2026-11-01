@@ -360,17 +360,21 @@ func startDNS(bind string, servers []zcdns.LocalServer) {
 		_ = w.WriteMsg(reply)
 	})
 	go func() {
-		_ = (&dns.Server{Addr: bind, Net: "udp", Handler: handler}).ListenAndServe()
+		if err := (&dns.Server{Addr: bind, Net: "udp", Handler: handler}).ListenAndServe(); err != nil {
+			log.Printf("DNS udp %s: %v", bind, err)
+		}
 	}()
 	go func() {
-		_ = (&dns.Server{Addr: bind, Net: "tcp", Handler: handler}).ListenAndServe()
+		if err := (&dns.Server{Addr: bind, Net: "tcp", Handler: handler}).ListenAndServe(); err != nil {
+			log.Printf("DNS tcp %s: %v", bind, err)
+		}
 	}()
 	log.Printf("DNS listening on %s", bind)
 }
 
 // guardDNS keeps every network service pointed at addr while TUN is up.
 func guardDNS(stop <-chan struct{}, addr string) {
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(dnsGuardInterval)
 	defer ticker.Stop()
 	for {
 		select {

@@ -177,6 +177,11 @@ func (a *app) startGlobalTUN(id string) {
 	_ = os.Remove(a.accessLogPath())
 
 	a.win.Update(func() { a.toast = "正在开启全局 TUN…" })
+	launchPath := filepath.Join(a.dir, "tun-launch.log")
+	launchLog, lerr := os.Create(launchPath)
+	if lerr == nil {
+		defer launchLog.Close()
+	}
 	cmd, err := helperCommand(helper, []string{
 		"-config", cfgPath,
 		"-log-file", logPath,
@@ -184,7 +189,7 @@ func (a *app) startGlobalTUN(id string) {
 		"-pid-file", pidPath,
 		"-stop-file", stopPath,
 		"-gui-pid", strconv.Itoa(os.Getpid()),
-	}, nil)
+	}, launchLog)
 	if err != nil {
 		a.toast = "开启全局 TUN 失败：" + err.Error()
 		return
@@ -197,8 +202,8 @@ func (a *app) startGlobalTUN(id string) {
 	go func() { _ = cmd.Wait() }()
 
 	pid := 0
-	for i := 0; i < 40; i++ {
-		time.Sleep(150 * time.Millisecond)
+	for i := 0; i < 150; i++ {
+		time.Sleep(200 * time.Millisecond)
 		if b, err := os.ReadFile(pidPath); err == nil {
 			if v, _ := strconv.Atoi(strings.TrimSpace(string(b))); v > 0 {
 				pid = v
@@ -212,6 +217,9 @@ func (a *app) startGlobalTUN(id string) {
 	a.tunLogf("startGlobalTUN: pid=%d alive=%v", pid, alive)
 	if !alive {
 		tail := lastLines(logPath, 12)
+		if extra := lastLines(launchPath, 3); extra != "" && !strings.Contains(tail, "started") {
+			tail = extra + " ｜ " + tail
+		}
 		a.win.Update(func() {
 			a.tunOn = false
 			a.tunPID = 0
