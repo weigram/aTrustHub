@@ -10,8 +10,7 @@ import (
 )
 
 // supportsSystemProxy reports whether the system proxy can be set here.
-// Windows would need WinINET registry work, which is not implemented yet.
-func supportsSystemProxy() bool { return false }
+func supportsSystemProxy() bool { return true }
 
 // supportsElevatedTUN reports whether TUN can be started.
 func supportsElevatedTUN() bool { return true }

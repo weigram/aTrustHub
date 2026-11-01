@@ -171,8 +171,9 @@ done
 macOS 首次打开若被 Gatekeeper 拦截，右键 →「打开」，或执行
 `xattr -dr com.apple.quarantine /Applications/aTrustHub.app`。
 
-Windows 版目前提供**代理模式**（多接入点、统一入口 SOCKS5、应用中心、访问日志）；
-全局 TUN 依赖 wintun，启动时会请求管理员权限，仍在验证中；系统代理开关暂不显示。
+Windows 版提供**代理模式**（多接入点、统一入口 SOCKS5、应用中心、访问日志）与
+**系统代理开关**（写 WinINET 设置，浏览器等应用自动走代理）；
+全局 TUN 依赖 wintun，启动时会请求管理员权限，仍在验证中。
 
 ## 构建
 
@@ -222,7 +223,7 @@ git tag v1.0.0 && git push origin v1.0.0
 | 企业微信 / 账号密码登录 | ✅ | ✅ |
 | 应用中心、访问日志 | ✅ | ✅ |
 | 全局 TUN | ✅ | 实验（需 UAC，wintun） |
-| 系统代理开关 | ✅ | 暂未提供 |
+| 系统代理开关 | ✅ | ✅（WinINET） |
 
 ## 限制
 

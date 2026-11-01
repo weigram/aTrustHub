@@ -1,3 +1,5 @@
+//go:build darwin
+
 package main
 
 import (
@@ -6,6 +8,10 @@ import (
 	"os/exec"
 	"strings"
 )
+
+// systemProxyEnabled reports whether the macOS system proxy is on. The app
+// tracks its own switch, so this is only used to seed the UI.
+func systemProxyEnabled() bool { return false }
 
 // networkServices lists the enabled macOS network services, which system
 // proxy settings are applied to.
