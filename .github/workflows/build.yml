@@ -68,14 +68,13 @@ jobs:
         run: |
           cd third_party/zju-connect
           if [ "${{ matrix.platform }}" = "darwin/universal" ]; then
-            GOOS=darwin GOARCH=arm64 go build -o /tmp/helper-arm64 ./cmd/multitun
-            GOOS=darwin GOARCH=amd64 go build -o /tmp/helper-amd64 ./cmd/multitun
-            lipo -create /tmp/helper-arm64 /tmp/helper-amd64 \
-              -output ../../resources/zju-connect-multitun
+            # mygo 会把 darwin-arm64 与 darwin-amd64 合并进 universal 包。
+            GOOS=darwin GOARCH=arm64 go build -o ../../resources/darwin-arm64/zju-connect-multitun ./cmd/multitun
+            GOOS=darwin GOARCH=amd64 go build -o ../../resources/darwin-amd64/zju-connect-multitun ./cmd/multitun
           else
-            GOOS=windows GOARCH=amd64 go build -o ../../resources/zju-connect-multitun.exe ./cmd/multitun
+            GOOS=windows GOARCH=amd64 go build -o ../../resources/windows-amd64/zju-connect-multitun.exe ./cmd/multitun
           fi
-          ls -lh ../../resources/
+          find ../../resources -maxdepth 2 -type f | sort
 
       # mygo 在 Windows 上用它生成安装包，缺了会自动下载，这里先装好。
       - name: 安装 NSIS

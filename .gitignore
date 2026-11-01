@@ -9,4 +9,5 @@ build/
 .DS_Store
 
 # TUN 辅助程序（由 third_party/zju-connect 编译产出，见 make helpers）
-resources/zju-connect-multitun
+resources/*/zju-connect-multitun
+resources/*/zju-connect-multitun.exe
