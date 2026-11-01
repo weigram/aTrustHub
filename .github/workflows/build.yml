@@ -1,5 +1,6 @@
 name: build
 
+# 推送与 PR 跑测试；打 v* 标签时为每个平台各出一个安装文件并发 Release。
 on:
   push:
     branches: [main]
@@ -9,6 +10,10 @@ on:
 
 permissions:
   contents: write
+
+env:
+  GOFLAGS: -mod=mod
+  GOPROXY: https://proxy.golang.org,direct
 
 jobs:
   test:
@@ -20,35 +25,27 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: 单元测试
-        env:
-          GOPROXY: https://proxy.golang.org,direct
-        run: go test ./...
+      - run: go vet ./...
+      - run: go test ./...
 
   build:
-    name: 打包 ${{ matrix.target }}
+    name: 打包 ${{ matrix.artifact }}
+    # 只在打标签或手动触发时打包，普通推送跑测试就够。
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: test
-    runs-on: macos-14
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: darwin-arm64
-            goos: darwin
-            goarch: arm64
-            ext: ""
-          - target: darwin-amd64
-            goos: darwin
-            goarch: amd64
-            ext: ""
-          - target: darwin-universal
-            goos: darwin
-            goarch: universal
-            ext: ""
-          - target: windows-amd64
-            goos: windows
-            goarch: amd64
-            ext: ".exe"
+          # universal 一个包同时覆盖 Apple Silicon 与 Intel，产物是 .dmg。
+          - os: macos-latest
+            platform: darwin/universal
+            artifact: macos
+          # Windows 产物是 NSIS 安装包（atrusthub-setup-<版本>-amd64.exe）。
+          - os: windows-latest
+            platform: windows/amd64
+            artifact: windows-amd64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -56,57 +53,55 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: 清理旧辅助程序
-        run: rm -f resources/zju-connect-multitun resources/zju-connect-multitun.exe
+      # 产物名带版本号，所以 mygo.json 的 version 要跟标签一致。
+      - name: 同步版本号
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          sed -i.bak "s/\"version\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"version\": \"$v\"/" mygo.json
+          rm -f mygo.json.bak
+          cat mygo.json
 
-      - name: 编译 TUN 辅助程序（单架构）
-        if: matrix.goarch != 'universal'
-        env:
-          GOPROXY: https://proxy.golang.org,direct
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
+      - name: 编译 TUN 辅助程序
+        shell: bash
         run: |
           cd third_party/zju-connect
-          go build -o "../../resources/zju-connect-multitun${{ matrix.ext }}" ./cmd/multitun
+          if [ "${{ matrix.platform }}" = "darwin/universal" ]; then
+            GOOS=darwin GOARCH=arm64 go build -o /tmp/helper-arm64 ./cmd/multitun
+            GOOS=darwin GOARCH=amd64 go build -o /tmp/helper-amd64 ./cmd/multitun
+            lipo -create /tmp/helper-arm64 /tmp/helper-amd64 \
+              -output ../../resources/zju-connect-multitun
+          else
+            GOOS=windows GOARCH=amd64 go build -o ../../resources/zju-connect-multitun.exe ./cmd/multitun
+          fi
+          ls -lh ../../resources/
 
-      - name: 编译 TUN 辅助程序（universal）
-        if: matrix.goarch == 'universal'
-        env:
-          GOPROXY: https://proxy.golang.org,direct
+      # mygo 在 Windows 上用它生成安装包，缺了会自动下载，这里先装好。
+      - name: 安装 NSIS
+        if: runner.os == 'Windows'
+        run: choco install nsis -y --no-progress
+
+      - name: 打包
+        run: go tool mygo build -platform ${{ matrix.platform }}
+
+      - name: 检查产物
+        shell: bash
         run: |
-          cd third_party/zju-connect
-          GOOS=darwin GOARCH=arm64 go build -o /tmp/helper-arm64 ./cmd/multitun
-          GOOS=darwin GOARCH=amd64 go build -o /tmp/helper-amd64 ./cmd/multitun
-          lipo -create /tmp/helper-arm64 /tmp/helper-amd64 \
-            -output ../../resources/zju-connect-multitun
-          file ../../resources/zju-connect-multitun
-
-      - name: 打包应用
-        env:
-          GOPROXY: https://proxy.golang.org,direct
-        run: go tool mygo build -platform "${{ matrix.goos }}/${{ matrix.goarch }}" -skip-dmg
-
-      - name: 压缩 macOS .app
-        if: matrix.goos == 'darwin'
-        run: |
-          cd "build/darwin-${{ matrix.goarch }}"
-          ditto -c -k --sequesterRsrc --keepParent aTrustHub.app \
-            "aTrustHub-darwin-${{ matrix.goarch }}.zip"
-          ls -lh
-
-      - name: 压缩 Windows 程序
-        if: matrix.goos == 'windows'
-        run: |
-          cd "build/windows-${{ matrix.goarch }}"
-          zip -q "aTrustHub-windows-${{ matrix.goarch }}.zip" \
-            aTrustHub.exe "zju-connect-multitun${{ matrix.ext }}"
-          ls -lh
+          ls -lh build/*/ || true
+          find build -maxdepth 2 -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.tar.gz' -o -name '*.deb' \) -print
 
       - uses: actions/upload-artifact@v4
         with:
-          name: aTrustHub-${{ matrix.target }}
-          path: build/*/aTrustHub-${{ matrix.goos }}-${{ matrix.goarch }}.zip
+          name: ${{ matrix.artifact }}
+          path: |
+            build/**/*.dmg
+            build/**/*.exe
+            build/**/*.tar.gz
+            build/**/*.deb
+            build/**/checksums.txt
           if-no-files-found: error
+          compression-level: 0
 
   release:
     name: 发布 Release
@@ -118,14 +113,15 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-
-      - name: 校验产物
-        run: |
-          find dist -type f | sort
-          du -sh dist
-
+      - name: 列出产物
+        run: find dist -type f | sort
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/**/*.zip
+          files: |
+            dist/**/*.dmg
+            dist/**/*.exe
+            dist/**/*.tar.gz
+            dist/**/*.deb
+            dist/**/checksums.txt
+          fail_on_unmatched_files: false
           generate_release_notes: true
-          fail_on_unmatched_files: true

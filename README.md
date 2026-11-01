@@ -161,14 +161,12 @@ done
 
 ## 下载
 
-到 [Releases](https://github.com/weigram/aTrustHub/releases) 下载对应架构的压缩包：
+到 [Releases](https://github.com/weigram/aTrustHub/releases) 下载对应平台的安装文件：
 
-| 平台 | 包 | 说明 |
+| 平台 | 文件 | 说明 |
 | --- | --- | --- |
-| macOS 通用 | `aTrustHub-darwin-universal.zip` | Apple Silicon + Intel 都能跑，推荐 |
-| macOS Apple Silicon | `aTrustHub-darwin-arm64.zip` | 仅 M 系列，体积更小 |
-| macOS Intel（x86_64） | `aTrustHub-darwin-amd64.zip` | 仅 Intel Mac；`amd64` 就是 x86_64 |
-| Windows x64 | `aTrustHub-windows-amd64.zip` | 解压后运行 `aTrustHub.exe` |
+| macOS（通用） | `atrusthub-<版本>.dmg` | 一个包同时支持 Apple Silicon 与 Intel，打开后拖进「应用程序」 |
+| Windows x64 | `atrusthub-setup-<版本>-amd64.exe` | 安装包，双击安装即可 |
 
 macOS 首次打开若被 Gatekeeper 拦截，右键 →「打开」，或执行
 `xattr -dr com.apple.quarantine /Applications/aTrustHub.app`。
@@ -193,8 +191,8 @@ ZJU-Connect 分支（新增企业微信认证、应用列表、会话复用、�
 ## 持续集成
 
 `.github/workflows/build.yml` 会在每次 push / PR 时跑测试，并同时打包
-`darwin-arm64`、`darwin-amd64`、`windows-amd64` 三个产物；打 `v*` 标签时
-自动创建 Release 并附上三个 zip。
+macOS（`.dmg`，通用架构）与 Windows（NSIS 安装包 `.exe`）两个安装文件；
+打 `v*` 标签时自动创建 Release 并附上它们。
 
 ```sh
 git tag v1.0.0 && git push origin v1.0.0
