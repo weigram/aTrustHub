@@ -5,8 +5,8 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -62,10 +62,15 @@ Register-ScheduledTask -TaskName '%s' -Action $action -Principal $principal -For
 	if err := os.WriteFile(ps1, []byte(script), 0o644); err != nil {
 		return err
 	}
+	// Start-Process joins its -ArgumentList with spaces without quoting, so
+	// the whole inner command line is one string with the path in quotes.
+	inner := fmt.Sprintf(`-NoProfile -ExecutionPolicy Bypass -File "%s"`, ps1)
 	outer := fmt.Sprintf(
-		"$p = Start-Process -FilePath powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','%s' -Verb RunAs -Wait -PassThru -WindowStyle Hidden; exit $p.ExitCode",
-		ps1)
+		`$p = Start-Process -FilePath powershell -ArgumentList '%s' -Verb RunAs -Wait -PassThru -WindowStyle Hidden; exit $p.ExitCode`,
+		strings.ReplaceAll(inner, "'", "''"))
 	out, err := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", outer).CombinedOutput()
+	taskLog := filepath.Join(a.dir, "tun-task.log")
+	_ = os.WriteFile(taskLog, []byte(outer+"\n---\n"+string(out)), 0o644)
 	if err != nil {
 		return fmt.Errorf("%v：%s", err, strings.TrimSpace(string(out)))
 	}
@@ -73,6 +78,21 @@ Register-ScheduledTask -TaskName '%s' -Action $action -Principal $principal -For
 		return fmt.Errorf("计划任务未创建成功")
 	}
 	_ = os.WriteFile(marker, []byte(cmdline+"\n"), 0o600)
+	return nil
+}
+
+// startHelperElevated runs the helper directly with a UAC prompt, used when
+// the scheduled task is unavailable.
+func startHelperElevated(helper string, args []string, launchLog string) error {
+	inner := fmt.Sprintf(`-FilePath "%s" -ArgumentList '%s' -Verb RunAs -WindowStyle Hidden`,
+		strings.ReplaceAll(helper, `"`, `""`),
+		strings.ReplaceAll(buildArgumentLine(args), "'", "''"))
+	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", inner)
+	out, err := cmd.CombinedOutput()
+	_ = os.WriteFile(launchLog, out, 0o644)
+	if err != nil {
+		return fmt.Errorf("%v：%s", err, strings.TrimSpace(string(out)))
+	}
 	return nil
 }
 

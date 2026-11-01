@@ -118,3 +118,19 @@ func helperAlive(pid int) bool {
 	err := syscall.Kill(pid, 0)
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
+
+// startHelperElevated asks macOS for administrator rights and runs the helper,
+// used when the sudoers rule is missing or stale.
+func startHelperElevated(helper string, args []string, launchLog string) error {
+	parts := []string{shQuote(helper)}
+	for _, a := range args {
+		parts = append(parts, shQuote(a))
+	}
+	script := fmt.Sprintf(`do shell script "%s </dev/null >>%s 2>&1 &" with administrator privileges`,
+		strings.Join(parts, " "), strings.ReplaceAll(launchLog, `"`, `\"`))
+	out, err := exec.Command("osascript", "-e", script).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v：%s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}

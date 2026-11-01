@@ -184,14 +184,20 @@ func (a *app) startGlobalTUN(id string) {
 		"-stop-file", stopPath,
 		"-gui-file", guiPath,
 	}
+	privileged := true
 	if err := a.ensureHelperPrivilege(helper, args); err != nil {
-		a.tunLogf("startGlobalTUN: 免密规则未安装：%v", err)
+		privileged = false
+		a.tunLogf("startGlobalTUN: 免密启动不可用，将回退为每次授权：%v", err)
 	}
 
 	a.win.Update(func() { a.toast = "正在开启全局 TUN…" })
-	if err := startHelper(helper, args, launchPath); err != nil {
-		a.toast = "开启全局 TUN 失败：" + err.Error()
-		a.tunLogf("startGlobalTUN: 启动失败: %v", err)
+	startErr := startHelper(helper, args, launchPath)
+	if startErr != nil && !privileged {
+		startErr = startHelperElevated(helper, args, launchPath)
+	}
+	if startErr != nil {
+		a.toast = "开启全局 TUN 失败：" + startErr.Error()
+		a.tunLogf("startGlobalTUN: 启动失败: %v", startErr)
 		return
 	}
 
