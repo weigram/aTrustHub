@@ -94,6 +94,9 @@ func main() {
 		}
 	}
 
+	log.Printf("start: pid=%d config=%q stop=%q pidFile=%q gui=%d",
+		os.Getpid(), *cfgPath, *stopFile, *pidFile, *guiPID)
+
 	// Take over from an earlier helper, by pid: matching the command line
 	// would match this very process and kill it.
 	if *pidFile != "" {
@@ -158,7 +161,7 @@ func main() {
 	if *stopFile != "" || *guiPID > 0 {
 		go func() {
 			for {
-				time.Sleep(time.Second)
+				time.Sleep(300 * time.Millisecond)
 				if *stopFile != "" {
 					if _, err := os.Stat(*stopFile); err == nil {
 						if *pidFile != "" {
@@ -170,6 +173,9 @@ func main() {
 					}
 				}
 				if *guiPID > 0 && !processAlive(*guiPID) {
+					if *pidFile != "" {
+						_ = os.Remove(*pidFile)
+					}
 					stop <- syscall.SIGTERM
 					return
 				}
@@ -178,7 +184,9 @@ func main() {
 	}
 	<-stop
 	close(stopGuard)
+	log.Printf("stopping: restoring DNS")
 	restoreSystemDNS()
+	log.Printf("stopped")
 	log.Println("shutting down")
 	for _, p := range points {
 		p.client.Close()

@@ -169,6 +169,18 @@ func (a *app) startGlobalTUN(id string) {
 		a.tunLogf("startGlobalTUN: 免密规则未安装：%v", err)
 	}
 
+	// A helper left over from an earlier attempt would hold port 53 and the
+	// utun, so clear it before starting a new one.
+	if pidPath := filepath.Join(a.dir, "tun.pid"); pidPath != "" {
+		if b, err := os.ReadFile(pidPath); err == nil {
+			if old, aerr := strconv.Atoi(strings.TrimSpace(string(b))); aerr == nil && old > 0 && helperAlive(old) {
+				a.tunLogf("startGlobalTUN: 清理残留 helper pid=%d", old)
+				_ = terminateHelper(old)
+				time.Sleep(time.Second)
+			}
+		}
+	}
+
 	logPath := filepath.Join(a.dir, "tun.log")
 	pidPath := filepath.Join(a.dir, "tun.pid")
 	stopPath := filepath.Join(a.dir, "tun.stop")
@@ -277,26 +289,7 @@ func lastLines(path string, n int) string {
 }
 
 func (a *app) stopGlobalTUN() {
-	stopPath := filepath.Join(a.dir, "tun.stop")
-	pidPath := filepath.Join(a.dir, "tun.pid")
-	// Ask the helper to stop through the file it watches; it restores the
-	// system DNS itself on the way out.
-	if err := os.WriteFile(stopPath, []byte("stop\n"), 0o644); err != nil {
-		a.tunLogf("stopGlobalTUN: 写停止文件失败：%v", err)
-	}
-	stopped := false
-	for i := 0; i < 50; i++ {
-		time.Sleep(100 * time.Millisecond)
-		if _, err := os.Stat(pidPath); err != nil {
-			stopped = true
-			break
-		}
-	}
-	if !stopped {
-		a.tunLogf("stopGlobalTUN: helper 未在 5 秒内退出")
-	}
-	_ = os.Remove(stopPath)
-	_ = os.Remove(pidPath)
+	stopped := a.shutdownHelper(10 * time.Second)
 	a.win.Update(func() {
 		a.tunOn = false
 		a.tunPID = 0
@@ -312,16 +305,57 @@ func (a *app) stopGlobalTUN() {
 	a.persistTunState(false, "")
 }
 
+// shutdownHelper asks the helper to stop, then forces it if it lingers. It
+// reports whether the helper is gone.
+func (a *app) shutdownHelper(wait time.Duration) bool {
+	stopPath := filepath.Join(a.dir, "tun.stop")
+	pidPath := filepath.Join(a.dir, "tun.pid")
+	_ = os.WriteFile(stopPath, []byte("stop\n"), 0o644)
+	pid := a.tunPID
+	if pid <= 0 {
+		if b, err := os.ReadFile(pidPath); err == nil {
+			pid, _ = strconv.Atoi(strings.TrimSpace(string(b)))
+		}
+	}
+	deadline := time.Now().Add(wait)
+	for time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+		if pid > 0 && !helperAlive(pid) {
+			_ = os.Remove(stopPath)
+			_ = os.Remove(pidPath)
+			return true
+		}
+		if pid <= 0 {
+			if _, err := os.Stat(pidPath); err != nil {
+				_ = os.Remove(stopPath)
+				return true
+			}
+		}
+	}
+	// The helper did not leave on its own: stop it, so no orphan keeps the
+	// utun, routes and DNS hijacked.
+	if pid > 0 && helperAlive(pid) {
+		a.tunLogf("shutdownHelper: 强制结束 helper pid=%d", pid)
+		if err := terminateHelper(pid); err != nil {
+			a.tunLogf("shutdownHelper: 强制结束失败：%v", err)
+		}
+		for i := 0; i < 25; i++ {
+			time.Sleep(200 * time.Millisecond)
+			if !helperAlive(pid) {
+				_ = os.Remove(stopPath)
+				_ = os.Remove(pidPath)
+				return true
+			}
+		}
+		return false
+	}
+	_ = os.Remove(stopPath)
+	_ = os.Remove(pidPath)
+	return true
+}
+
 // stopTUNQuiet kills the helper and restores DNS without touching the UI,
 // for shutdown.
 func (a *app) stopTUNQuiet() {
-	stopPath := filepath.Join(a.dir, "tun.stop")
-	_ = os.WriteFile(stopPath, []byte("stop\n"), 0o644)
-	for i := 0; i < 30; i++ {
-		time.Sleep(100 * time.Millisecond)
-		if _, err := os.Stat(filepath.Join(a.dir, "tun.pid")); err != nil {
-			break
-		}
-	}
-	_ = os.Remove(stopPath)
+	_ = a.shutdownHelper(6 * time.Second)
 }

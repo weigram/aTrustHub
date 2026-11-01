@@ -4,11 +4,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -85,4 +88,25 @@ func (a *app) cleanupStaleDNS() {
 			a.tunLogf("启动清理：已恢复 %s 的 DNS", svc)
 		}
 	}
+}
+
+// terminateHelper force-stops the TUN helper by pid.
+func terminateHelper(pid int) error {
+	if pid <= 0 {
+		return nil
+	}
+	out, err := exec.Command("sudo", "-n", "kill", "-TERM", strconv.Itoa(pid)).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v：%s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// helperAlive reports whether the helper process still exists.
+func helperAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
 }

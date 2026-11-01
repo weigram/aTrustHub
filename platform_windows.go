@@ -58,3 +58,29 @@ func (a *app) cleanupStaleDNS() {
 		a.tunLogf("启动清理：已恢复系统 DNS")
 	}
 }
+
+// terminateHelper force-stops the TUN helper by pid. It runs elevated, so the
+// kill needs the same elevation.
+func terminateHelper(pid int) error {
+	if pid <= 0 {
+		return nil
+	}
+	ps := fmt.Sprintf(
+		"Start-Process -FilePath taskkill -ArgumentList '/PID','%d','/F' -Verb RunAs -Wait -WindowStyle Hidden", pid)
+	if out, err := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps).CombinedOutput(); err != nil {
+		return fmt.Errorf("%v：%s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// helperAlive reports whether the helper process still exists.
+func helperAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	out, err := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/NH").Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), fmt.Sprintf("%d", pid))
+}
