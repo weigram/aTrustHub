@@ -12,19 +12,19 @@ import (
 // setSystemDNS points every interface's IPv4 DNS at addr.
 func setSystemDNS(addr string) {
 	_ = exec.Command("powershell", "-NoProfile", "-Command",
-		fmt.Sprintf("Get-DnsClientServerAddress -AddressFamily IPv4 | Set-DnsClientServerAddress -ServerAddresses %s", addr)).Run()
+		fmt.Sprintf("Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -notlike 'aTrustHub*' } | Set-DnsClientServerAddress -ServerAddresses %s", addr)).Run()
 }
 
 // restoreSystemDNS hands DNS back to DHCP.
 func restoreSystemDNS() {
 	_ = exec.Command("powershell", "-NoProfile", "-Command",
-		"Get-DnsClientServerAddress -AddressFamily IPv4 | Set-DnsClientServerAddress -ResetServerAddresses").Run()
+		"Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -notlike 'aTrustHub*' } | Set-DnsClientServerAddress -ResetServerAddresses").Run()
 }
 
 // systemDNSIs reports whether every interface already uses addr.
 func systemDNSIs(addr string) bool {
 	out, err := exec.Command("powershell", "-NoProfile", "-Command",
-		"Get-DnsClientServerAddress -AddressFamily IPv4 | Select-Object -ExpandProperty ServerAddresses").Output()
+		"Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -notlike 'aTrustHub*' } | Select-Object -ExpandProperty ServerAddresses").Output()
 	if err != nil {
 		return false
 	}

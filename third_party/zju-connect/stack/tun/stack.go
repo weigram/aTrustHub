@@ -46,6 +46,13 @@ type Stack struct {
 	AccessLog func(target string, port int, ok bool)
 }
 
+// ifaceName, when set, names the Windows adapter, so several stacks can run
+// side by side instead of sharing one device.
+var ifaceName string
+
+// SetInterfaceName overrides the Windows adapter name of stacks created next.
+func SetInterfaceName(name string) { ifaceName = name }
+
 func (s *Stack) SetupResolve(r zcdns.LocalServer) {
 	s.resolve = r
 }

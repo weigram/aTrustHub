@@ -122,8 +122,8 @@ func main() {
 	cleanupLegacyHosts()
 
 	var points []*point
-	for _, pc := range cfg.Points {
-		p, err := startPoint(pc, *accessLog)
+	for i, pc := range cfg.Points {
+		p, err := startPoint(pc, *accessLog, i)
 		if err != nil {
 			log.Printf("point %s: %v", pc.Name, err)
 			continue
@@ -193,7 +193,7 @@ func main() {
 }
 
 // startPoint resumes one access point and starts its TUN stack.
-func startPoint(pc pointConfig, accessLog string) (*point, error) {
+func startPoint(pc pointConfig, accessLog string, index int) (*point, error) {
 	clientData, err := os.ReadFile(pc.ClientData)
 	if err != nil {
 		return nil, fmt.Errorf("read client data: %w", err)
@@ -236,6 +236,9 @@ func startPoint(pc pointConfig, accessLog string) (*point, error) {
 		secondary = servers[1]
 	}
 
+	// Windows gives every stack its own adapter; the name must be unique and
+	// free of spaces, because netsh takes it as one argument.
+	tun.SetInterfaceName(fmt.Sprintf("aTrustHub%d", index))
 	st, err := tun.NewStack(cli, true, true, ipResources)
 	if err != nil {
 		cli.Close()

@@ -2,6 +2,7 @@ package tun
 
 import (
 	"context"
+	"crypto/md5"
 	"fmt"
 	"net"
 	"net/netip"
@@ -18,6 +19,19 @@ import (
 
 const guid = "{4F5CDE94-D2A3-4AA5-A4A3-0FE6CB909E83}"
 const interfaceName = "ZJU Connect"
+
+// adapterFor picks the adapter name and GUID for this stack. A custom name
+// (multi-point mode) gets its own GUID, derived from the name, so Windows
+// creates a separate device per access point.
+func adapterFor() (string, string) {
+	if ifaceName == "" {
+		return interfaceName, guid
+	}
+	sum := md5.Sum([]byte(ifaceName))
+	derived := fmt.Sprintf("{%X-%X-%X-%X-%X}",
+		sum[0:4], sum[4:6], sum[6:8], sum[8:10], sum[10:16])
+	return ifaceName, derived
+}
 
 type Endpoint struct {
 	client client.Client
@@ -83,12 +97,13 @@ func NewStack(client client.Client, dnsHijack, fakeIP bool, ipResources []client
 	s.ipResources = ipResources
 	s.fakeIP = fakeIP
 
-	guid, err := windows.GUIDFromString(guid)
+	name, guidStr := adapterFor()
+	adapterGUID, err := windows.GUIDFromString(guidStr)
 	if err != nil {
 		return nil, err
 	}
 
-	dev, err := tun.CreateTUNWithRequestedGUID(interfaceName, &guid, int(MTU))
+	dev, err := tun.CreateTUNWithRequestedGUID(name, &adapterGUID, int(MTU))
 	if err != nil {
 		return nil, err
 	}
@@ -119,21 +134,24 @@ func NewStack(client client.Client, dnsHijack, fakeIP bool, ipResources []client
 	}
 
 	// Set MTU to 1400 otherwise error may occur when packets are large
-	command := exec.Command("netsh", "interface", "ipv4", "set", "subinterface", interfaceName, fmt.Sprintf("mtu=%d", MTU), "store=persistent")
+	command := exec.Command("netsh", "interface", "ipv4", "set", "subinterface", name, fmt.Sprintf("mtu=%d", MTU), "store=persistent")
 	err = command.Run()
 	if err != nil {
 		log.Printf("Run %s failed: %v", command.String(), err)
 	}
 
-	// We must add a route to 0.0.0.0/0, otherwise Windows will refuse to send packets to public network via TUN interface
-	// Set metric to 9999 to make sure normal traffic not go through TUN interface
-	command = exec.Command("route", "add", "0.0.0.0", "mask", "0.0.0.0", s.endpoint.ip.String(), "metric", "9999")
-	err = command.Run()
-	if err != nil {
-		log.Printf("Run %s failed: %v", command.String(), err)
+	// The default route is only needed for full-tunnel use. In multi-point
+	// mode each stack gets explicit routes instead, and a second default
+	// route would fight the first.
+	if ifaceName == "" {
+		command = exec.Command("route", "add", "0.0.0.0", "mask", "0.0.0.0", s.endpoint.ip.String(), "metric", "9999")
+		err = command.Run()
+		if err != nil {
+			log.Printf("Run %s failed: %v", command.String(), err)
+		}
 	}
 
-	command = exec.Command("netsh", "interface", "ipv4", "delete", "dnsservers", "ZJU Connect", "all")
+	command = exec.Command("netsh", "interface", "ipv4", "delete", "dnsservers", name, "all")
 	err = command.Run()
 	if err != nil {
 		log.Printf("Run %s failed: %v", command.String(), err)
@@ -143,7 +161,7 @@ func NewStack(client client.Client, dnsHijack, fakeIP bool, ipResources []client
 		if fakeIP {
 			dnsServerIP = "198.18.0.1"
 		}
-		command = exec.Command("netsh", "interface", "ipv4", "add", "dnsservers", "ZJU Connect", dnsServerIP)
+		command = exec.Command("netsh", "interface", "ipv4", "add", "dnsservers", name, dnsServerIP)
 		err = command.Run()
 		if err != nil {
 			log.Printf("Run %s failed: %v", command.String(), err)
@@ -152,7 +170,7 @@ func NewStack(client client.Client, dnsHijack, fakeIP bool, ipResources []client
 
 	hook_func.RegisterTerminalFunc("Close Tun Device", func(ctx context.Context) error {
 		dev.Close()
-		closeCommand := exec.Command("netsh", "interface", "ipv4", "delete", "dnsservers", "ZJU Connect", "all")
+		closeCommand := exec.Command("netsh", "interface", "ipv4", "delete", "dnsservers", name, "all")
 		return closeCommand.Run()
 	})
 	return s, nil
