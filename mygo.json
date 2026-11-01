@@ -1,7 +1,7 @@
 {
   "name": "aTrustHub",
   "identifier": "app.atrust.hub",
-  "version": "0.19.0",
+  "version": "0.19.1",
   "copyright": "Copyright © 2026 aTrust Hub",
   "out": "build"
 }
