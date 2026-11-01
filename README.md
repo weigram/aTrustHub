@@ -165,8 +165,9 @@ done
 
 | 平台 | 包 | 说明 |
 | --- | --- | --- |
-| macOS Apple Silicon | `aTrustHub-darwin-arm64.zip` | 解压后把 `aTrustHub.app` 拖进「应用程序」 |
-| macOS Intel | `aTrustHub-darwin-amd64.zip` | 同上 |
+| macOS 通用 | `aTrustHub-darwin-universal.zip` | Apple Silicon + Intel 都能跑，推荐 |
+| macOS Apple Silicon | `aTrustHub-darwin-arm64.zip` | 仅 M 系列，体积更小 |
+| macOS Intel（x86_64） | `aTrustHub-darwin-amd64.zip` | 仅 Intel Mac；`amd64` 就是 x86_64 |
 | Windows x64 | `aTrustHub-windows-amd64.zip` | 解压后运行 `aTrustHub.exe` |
 
 macOS 首次打开若被 Gatekeeper 拦截，右键 →「打开」，或执行

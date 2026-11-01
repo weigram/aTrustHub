@@ -41,6 +41,10 @@ jobs:
             goos: darwin
             goarch: amd64
             ext: ""
+          - target: darwin-universal
+            goos: darwin
+            goarch: universal
+            ext: ""
           - target: windows-amd64
             goos: windows
             goarch: amd64
@@ -55,7 +59,8 @@ jobs:
       - name: 清理旧辅助程序
         run: rm -f resources/zju-connect-multitun resources/zju-connect-multitun.exe
 
-      - name: 编译 TUN 辅助程序
+      - name: 编译 TUN 辅助程序（单架构）
+        if: matrix.goarch != 'universal'
         env:
           GOPROXY: https://proxy.golang.org,direct
           GOOS: ${{ matrix.goos }}
@@ -63,6 +68,18 @@ jobs:
         run: |
           cd third_party/zju-connect
           go build -o "../../resources/zju-connect-multitun${{ matrix.ext }}" ./cmd/multitun
+
+      - name: 编译 TUN 辅助程序（universal）
+        if: matrix.goarch == 'universal'
+        env:
+          GOPROXY: https://proxy.golang.org,direct
+        run: |
+          cd third_party/zju-connect
+          GOOS=darwin GOARCH=arm64 go build -o /tmp/helper-arm64 ./cmd/multitun
+          GOOS=darwin GOARCH=amd64 go build -o /tmp/helper-amd64 ./cmd/multitun
+          lipo -create /tmp/helper-arm64 /tmp/helper-amd64 \
+            -output ../../resources/zju-connect-multitun
+          file ../../resources/zju-connect-multitun
 
       - name: 打包应用
         env:
