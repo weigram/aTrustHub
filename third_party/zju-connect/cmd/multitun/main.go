@@ -11,7 +11,6 @@ package main
 import (
 	"context"
 	"encoding/binary"
-	"os/exec"
 	"strings"
 	"encoding/json"
 	"flag"
@@ -100,17 +99,24 @@ func main() {
 	if *pidFile != "" {
 		if b, rerr := os.ReadFile(*pidFile); rerr == nil {
 			if old, aerr := strconv.Atoi(strings.TrimSpace(string(b))); aerr == nil && old > 0 && old != os.Getpid() {
-				if syscall.Kill(old, 0) == nil {
-					_ = syscall.Kill(old, syscall.SIGTERM)
+				if processAlive(old) {
+					terminateProcess(old)
 					time.Sleep(300 * time.Millisecond)
 				}
 			}
 		}
 		_ = os.WriteFile(*pidFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644)
+		go func() {
+			for {
+				time.Sleep(2 * time.Second)
+				now := time.Now()
+				_ = os.Chtimes(*pidFile, now, now)
+			}
+		}()
 	}
 	// Older builds pinned internal names in /etc/hosts with pretend IPs;
 	// strip that block so it cannot shadow the resolver below.
-	stripHostsBlock("/etc/hosts", "# >>> aTrust Hub TUN >>>", "# <<< aTrust Hub TUN <<<")
+	cleanupLegacyHosts()
 
 	// Point the system at our resolver straight away; guardDNS keeps it there.
 	setSystemDNS("127.0.0.1")
@@ -163,7 +169,7 @@ func main() {
 						return
 					}
 				}
-				if *guiPID > 0 && syscall.Kill(*guiPID, 0) != nil {
+				if *guiPID > 0 && !processAlive(*guiPID) {
 					stop <- syscall.SIGTERM
 					return
 				}
@@ -172,7 +178,7 @@ func main() {
 	}
 	<-stop
 	close(stopGuard)
-	restoreDNS()
+	restoreSystemDNS()
 	log.Println("shutting down")
 	for _, p := range points {
 		p.client.Close()
@@ -371,15 +377,9 @@ func guardDNS(stop <-chan struct{}, addr string) {
 		case <-stop:
 			return
 		case <-ticker.C:
-			for _, svc := range networkServices() {
-				out, err := exec.Command("networksetup", "-getdnsservers", svc).Output()
-				if err != nil {
-					continue
-				}
-				if !strings.Contains(string(out), addr) {
-					log.Printf("dns guard: %s was %q, setting %s", svc, strings.TrimSpace(string(out)), addr)
-					_ = exec.Command("networksetup", "-setdnsservers", svc, addr).Run()
-				}
+			if !systemDNSIs(addr) {
+				log.Printf("dns guard: system DNS moved away, setting %s", addr)
+				setSystemDNS(addr)
 			}
 		}
 	}
@@ -408,37 +408,6 @@ func stripHostsBlock(path, start, end string) {
 	if cleaned != string(data) {
 		_ = os.WriteFile(path, []byte(cleaned), 0o644)
 	}
-}
-
-// setSystemDNS points every network service at addr.
-func setSystemDNS(addr string) {
-	for _, svc := range networkServices() {
-		_ = exec.Command("networksetup", "-setdnsservers", svc, addr).Run()
-	}
-}
-
-// restoreDNS puts the services back to DHCP-provided DNS.
-func restoreDNS() {
-	for _, svc := range networkServices() {
-		_ = exec.Command("networksetup", "-setdnsservers", svc, "Empty").Run()
-	}
-}
-
-// networkServices lists enabled network services.
-func networkServices() []string {
-	out, err := exec.Command("/bin/sh", "-c", "networksetup -listallnetworkservices | tail -n +2").Output()
-	if err != nil {
-		return nil
-	}
-	var list []string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "*") {
-			continue
-		}
-		list = append(list, line)
-	}
-	return list
 }
 
 func fatal(format string, args ...any) {

@@ -1,16 +1,12 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/egoist/mygo"
@@ -19,35 +15,16 @@ import (
 	"github.com/qy/easyconnect/internal/vpn"
 )
 
-// restoreStaleDNS undoes the system DNS our TUN mode sets, when a previous
-// run ended without cleaning up (the relay is gone, so 127.0.0.1 would break
-// resolution).
-func (a *app) restoreStaleDNS() {
-	services, err := networkServices()
-	if err != nil {
-		return
-	}
-	for _, svc := range services {
-		out, err := exec.Command("networksetup", "-getdnsservers", svc).Output()
-		if err != nil {
-			continue
-		}
-		if strings.Contains(string(out), "127.0.0.1") {
-			_ = exec.Command("networksetup", "-setdnsservers", svc, "Empty").Run()
-			a.tunLogf("启动清理：已恢复 %s 的 DNS", svc)
-		}
-	}
-}
-
 // multitunPath is the bundled multi-point TUN helper.
 func multitunPath() string {
+	name := "zju-connect-multitun" + helperSuffix
 	if dir, err := mygo.App.Path(mygo.PathResources); err == nil && dir != "" {
-		p := filepath.Join(dir, "zju-connect-multitun")
+		p := filepath.Join(dir, name)
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
 	}
-	return filepath.Join("resources", "zju-connect-multitun")
+	return filepath.Join("resources", name)
 }
 
 func shQuote(s string) string {
@@ -110,50 +87,6 @@ var tunFakeRanges = []string{
 // ensureHelperSudo makes running helper need no password, once. It installs a
 // sudoers rule for this exact binary; if that is impossible the caller falls
 // back to the system authorization prompt.
-func (a *app) ensureHelperSudo(helper string) error {
-	const rulePath = "/etc/sudoers.d/atrust-hub"
-	marker := filepath.Join(a.dir, "sudoers-helper.txt")
-	// The rule file is root-only readable, but its presence is visible, and
-	// the marker records which binary it allows.
-	if _, err := os.Stat(rulePath); err == nil {
-		if b, rerr := os.ReadFile(marker); rerr == nil && strings.TrimSpace(string(b)) == helper {
-			return nil
-		}
-	}
-	user := os.Getenv("USER")
-	if user == "" {
-		return fmt.Errorf("找不到当前用户")
-	}
-	// sudoers wants spaces escaped, not quoted.
-	rulePathInRule := strings.ReplaceAll(helper, " ", `\ `)
-	rule := fmt.Sprintf("%s ALL=(root) NOPASSWD: %s\n", user, rulePathInRule)
-	tmp, err := os.CreateTemp("", "atrust-sudoers-*")
-	if err != nil {
-		return err
-	}
-	path := tmp.Name()
-	defer os.Remove(path)
-	if _, err := tmp.WriteString(rule); err != nil {
-		tmp.Close()
-		return err
-	}
-	tmp.Close()
-	_ = os.Chmod(path, 0o600)
-	script := fmt.Sprintf("mkdir -p /etc/sudoers.d && cp %s %s && chmod 440 %s", shQuote(path), rulePath, rulePath)
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "osascript", "-e",
-		fmt.Sprintf(`do shell script "%s" with administrator privileges`, strings.ReplaceAll(script, `"`, `\"`)))
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%v：%s", err, strings.TrimSpace(string(out)))
-	}
-	if _, err := os.Stat(rulePath); err != nil {
-		return fmt.Errorf("免密规则未写入")
-	}
-	_ = os.WriteFile(marker, []byte(helper+"\n"), 0o600)
-	a.tunLogf("startGlobalTUN: 已安装免密规则，之后开启 TUN 不再需要密码")
-	return nil
-}
 
 // startGlobalTUN runs one native aTrust TUN stack per online access point.
 func (a *app) startGlobalTUN(id string) {
@@ -232,7 +165,7 @@ func (a *app) startGlobalTUN(id string) {
 		a.sysProxyOn = false
 	}
 	// Make later openings password-free; the first one may still prompt.
-	if err := a.ensureHelperSudo(helper); err != nil {
+	if err := a.ensureHelperPrivilege(helper); err != nil {
 		a.tunLogf("startGlobalTUN: 免密规则未安装：%v", err)
 	}
 
@@ -244,14 +177,18 @@ func (a *app) startGlobalTUN(id string) {
 	_ = os.Remove(a.accessLogPath())
 
 	a.win.Update(func() { a.toast = "正在开启全局 TUN…" })
-	cmd := exec.Command("sudo", "-n", helper,
+	cmd, err := helperCommand(helper, []string{
 		"-config", cfgPath,
 		"-log-file", logPath,
 		"-access-log", a.accessLogPath(),
 		"-pid-file", pidPath,
 		"-stop-file", stopPath,
 		"-gui-pid", strconv.Itoa(os.Getpid()),
-	)
+	}, nil)
+	if err != nil {
+		a.toast = "开启全局 TUN 失败：" + err.Error()
+		return
+	}
 	if err := cmd.Start(); err != nil {
 		a.toast = "开启全局 TUN 失败：" + err.Error()
 		a.tunLogf("startGlobalTUN: 启动失败: %v", err)
@@ -271,11 +208,7 @@ func (a *app) startGlobalTUN(id string) {
 	}
 	// The helper runs as root, so signalling it from this user answers EPERM
 	// when it is alive — only ESRCH means it is gone.
-	alive := false
-	if pid > 0 {
-		err := syscall.Kill(pid, 0)
-		alive = err == nil || errors.Is(err, syscall.EPERM)
-	}
+	alive := pid > 0 && pidFileFresh(pidPath, 8*time.Second)
 	a.tunLogf("startGlobalTUN: pid=%d alive=%v", pid, alive)
 	if !alive {
 		tail := lastLines(logPath, 12)
@@ -296,6 +229,17 @@ func (a *app) startGlobalTUN(id string) {
 	})
 	succeeded = true
 	a.persistTunState(true, id)
+}
+
+// pidFileFresh reports whether the helper wrote its pid file recently. The
+// helper refreshes it every couple of seconds, which works the same on every
+// platform, unlike signalling a process owned by another user.
+func pidFileFresh(path string, maxAge time.Duration) bool {
+	st, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return time.Since(st.ModTime()) < maxAge
 }
 
 func (a *app) persistTunState(on bool, id string) {

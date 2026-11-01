@@ -593,7 +593,7 @@ func (a *app) header(c *ui.Context) {
 				OnClick(a.openTUNLog).Tooltip("TUN 日志").Children(func() {
 				ui.Icon(c, logIcon).Size(16, 16)
 			})
-			if agg := a.mgr.Aggregate(); agg.Running {
+			if agg := a.mgr.Aggregate(); agg.Running && supportsSystemProxy() {
 				a.sysProxySwitch = a.sysProxyOn
 				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 					ui.Text(c, "系统代理").FontSize(13)

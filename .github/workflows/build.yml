@@ -26,13 +26,25 @@ jobs:
         run: go test ./...
 
   build:
-    name: 打包 darwin-${{ matrix.arch }}
+    name: 打包 ${{ matrix.target }}
     needs: test
     runs-on: macos-14
     strategy:
       fail-fast: false
       matrix:
-        arch: [arm64, amd64]
+        include:
+          - target: darwin-arm64
+            goos: darwin
+            goarch: arm64
+            ext: ""
+          - target: darwin-amd64
+            goos: darwin
+            goarch: amd64
+            ext: ""
+          - target: windows-amd64
+            goos: windows
+            goarch: amd64
+            ext: ".exe"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -40,31 +52,43 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: 清理旧辅助程序
+        run: rm -f resources/zju-connect-multitun resources/zju-connect-multitun.exe
+
       - name: 编译 TUN 辅助程序
         env:
           GOPROXY: https://proxy.golang.org,direct
-          GOARCH: ${{ matrix.arch }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
         run: |
           cd third_party/zju-connect
-          go build -o ../../resources/zju-connect-multitun ./cmd/multitun
+          go build -o "../../resources/zju-connect-multitun${{ matrix.ext }}" ./cmd/multitun
 
-      - name: 打包 .app
+      - name: 打包应用
         env:
           GOPROXY: https://proxy.golang.org,direct
-          GOARCH: ${{ matrix.arch }}
-        run: go tool mygo build -skip-dmg
+        run: go tool mygo build -platform "${{ matrix.goos }}/${{ matrix.goarch }}" -skip-dmg
 
-      - name: 压缩为 zip
+      - name: 压缩 macOS .app
+        if: matrix.goos == 'darwin'
         run: |
-          cd "build/darwin-${{ matrix.arch }}"
+          cd "build/darwin-${{ matrix.goarch }}"
           ditto -c -k --sequesterRsrc --keepParent aTrustHub.app \
-            "aTrustHub-darwin-${{ matrix.arch }}.zip"
+            "aTrustHub-darwin-${{ matrix.goarch }}.zip"
+          ls -lh
+
+      - name: 压缩 Windows 程序
+        if: matrix.goos == 'windows'
+        run: |
+          cd "build/windows-${{ matrix.goarch }}"
+          zip -q "aTrustHub-windows-${{ matrix.goarch }}.zip" \
+            aTrustHub.exe "zju-connect-multitun${{ matrix.ext }}"
           ls -lh
 
       - uses: actions/upload-artifact@v4
         with:
-          name: aTrustHub-darwin-${{ matrix.arch }}
-          path: build/darwin-${{ matrix.arch }}/aTrustHub-darwin-${{ matrix.arch }}.zip
+          name: aTrustHub-${{ matrix.target }}
+          path: build/*/aTrustHub-${{ matrix.goos }}-${{ matrix.goarch }}.zip
           if-no-files-found: error
 
   release:

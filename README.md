@@ -3,8 +3,8 @@
 [![build](https://github.com/weigram/aTrustHub/actions/workflows/build.yml/badge.svg)](https://github.com/weigram/aTrustHub/actions/workflows/build.yml)
 [![release](https://img.shields.io/github/v/release/weigram/aTrustHub?display_name=tag)](https://github.com/weigram/aTrustHub/releases)
 
-**同时登录多个 aTrust 接入点**的 macOS 客户端。一个窗口里管理多个零信任网关，
-每个接入点各自保持一条独立隧道，并能按「目标属于谁」自动分流。
+**同时登录多个 aTrust 接入点**的桌面客户端（macOS / Windows）。一个窗口里管理多个
+零信任网关，每个接入点各自保持一条独立隧道，并能按「目标属于谁」自动分流。
 
 支持两种登录方式：**企业微信认证**（扫码 / 电脑端确认）与 **账号密码**（可叠加 TOTP）。
 
@@ -163,11 +163,17 @@ done
 
 到 [Releases](https://github.com/weigram/aTrustHub/releases) 下载对应架构的压缩包：
 
-- `aTrustHub-darwin-arm64.zip`：Apple Silicon（M 系列）；
-- `aTrustHub-darwin-amd64.zip`：Intel Mac。
+| 平台 | 包 | 说明 |
+| --- | --- | --- |
+| macOS Apple Silicon | `aTrustHub-darwin-arm64.zip` | 解压后把 `aTrustHub.app` 拖进「应用程序」 |
+| macOS Intel | `aTrustHub-darwin-amd64.zip` | 同上 |
+| Windows x64 | `aTrustHub-windows-amd64.zip` | 解压后运行 `aTrustHub.exe` |
 
-解压后把 `aTrustHub.app` 拖进「应用程序」。首次打开若被 Gatekeeper 拦截，
-右键 →「打开」，或执行 `xattr -dr com.apple.quarantine /Applications/aTrustHub.app`。
+macOS 首次打开若被 Gatekeeper 拦截，右键 →「打开」，或执行
+`xattr -dr com.apple.quarantine /Applications/aTrustHub.app`。
+
+Windows 版目前提供**代理模式**（多接入点、统一入口 SOCKS5、应用中心、访问日志）；
+全局 TUN 依赖 wintun，启动时会请求管理员权限，仍在验证中；系统代理开关暂不显示。
 
 ## 构建
 
@@ -186,8 +192,8 @@ ZJU-Connect 分支（新增企业微信认证、应用列表、会话复用、�
 ## 持续集成
 
 `.github/workflows/build.yml` 会在每次 push / PR 时跑测试，并同时打包
-`darwin-arm64` 与 `darwin-amd64` 两个产物；打 `v*` 标签时自动创建 Release
-并附上两个 zip。
+`darwin-arm64`、`darwin-amd64`、`windows-amd64` 三个产物；打 `v*` 标签时
+自动创建 Release 并附上三个 zip。
 
 ```sh
 git tag v1.0.0 && git push origin v1.0.0
@@ -208,6 +214,16 @@ git tag v1.0.0 && git push origin v1.0.0
       每个接入点一套原生 TUN 栈 + 独立伪装 IP 池
       系统 DNS 127.0.0.1 → 按接入点解析
 ```
+
+## 平台差异
+
+| 功能 | macOS | Windows |
+| --- | --- | --- |
+| 多接入点 + 统一入口 SOCKS5 | ✅ | ✅ |
+| 企业微信 / 账号密码登录 | ✅ | ✅ |
+| 应用中心、访问日志 | ✅ | ✅ |
+| 全局 TUN | ✅ | 实验（需 UAC，wintun） |
+| 系统代理开关 | ✅ | 暂未提供 |
 
 ## 限制
 
