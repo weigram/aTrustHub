@@ -1,0 +1,12 @@
+# mygo 的构建产物
+build/
+.mygo/
+
+# 本地模块与编译缓存（make LOCAL=1）
+.cache/
+
+# macOS
+.DS_Store
+
+# TUN 辅助程序（由 third_party/zju-connect 编译产出，见 make helpers）
+resources/zju-connect-multitun

@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "settings": {
+    "listenHost": "127.0.0.1",
+    "aggregatePort": 11080,
+    "aggregateEnabled": true,
+    "routing": "latency",
+    "healthIntervalSec": 0,
+    "autoReconnect": false
+  },
+  "points": [
+    {
+      "id": "example-1",
+      "name": "示例接入点 1",
+      "server": "vpn.example.com",
+      "port": 44892,
+      "username": "",
+      "authMode": "auto",
+      "loginDomain": "",
+      "socksPort": 11081,
+      "inPool": true,
+      "autoConnect": false
+    },
+    {
+      "id": "example-2",
+      "name": "示例接入点 2",
+      "server": "vpn2.example.com",
+      "port": 44892,
+      "username": "",
+      "authMode": "auto",
+      "loginDomain": "",
+      "socksPort": 11082,
+      "inPool": true,
+      "autoConnect": false
+    },
+    {
+      "id": "example-3",
+      "name": "示例接入点 3",
+      "server": "zeroportal.example.com",
+      "port": 8888,
+      "username": "",
+      "authMode": "auto",
+      "loginDomain": "",
+      "socksPort": 11083,
+      "inPool": true,
+      "autoConnect": false
+    },
+    {
+      "id": "example-4",
+      "name": "示例接入点 4",
+      "server": "netoa.example.com",
+      "port": 52443,
+      "username": "",
+      "authMode": "auto",
+      "loginDomain": "",
+      "socksPort": 11084,
+      "inPool": true,
+      "autoConnect": false
+    }
+  ]
+}

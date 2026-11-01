@@ -1,0 +1,375 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/egoist/mygo"
+
+	"github.com/qy/easyconnect/internal/model"
+	"github.com/qy/easyconnect/internal/vpn"
+)
+
+// restoreStaleDNS undoes the system DNS our TUN mode sets, when a previous
+// run ended without cleaning up (the relay is gone, so 127.0.0.1 would break
+// resolution).
+func (a *app) restoreStaleDNS() {
+	services, err := networkServices()
+	if err != nil {
+		return
+	}
+	for _, svc := range services {
+		out, err := exec.Command("networksetup", "-getdnsservers", svc).Output()
+		if err != nil {
+			continue
+		}
+		if strings.Contains(string(out), "127.0.0.1") {
+			_ = exec.Command("networksetup", "-setdnsservers", svc, "Empty").Run()
+			a.tunLogf("启动清理：已恢复 %s 的 DNS", svc)
+		}
+	}
+}
+
+// multitunPath is the bundled multi-point TUN helper.
+func multitunPath() string {
+	if dir, err := mygo.App.Path(mygo.PathResources); err == nil && dir != "" {
+		p := filepath.Join(dir, "zju-connect-multitun")
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return filepath.Join("resources", "zju-connect-multitun")
+}
+
+func shQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// startGlobalTUN launches the bundled ZJU-Connect TUN engine as root, using
+// the session already saved by the GUI (cookies + resource data), so no
+// second login is needed. It creates a utun, adds routes and hijacks DNS.
+// tunLogf writes a diagnostic line about the TUN helper to the app log.
+func (a *app) tunLogf(format string, args ...any) {
+	if a.bus != nil {
+		a.bus.Add("app", fmt.Sprintf(format, args...))
+	}
+}
+
+// tunPointConfig mirrors cmd/multitun's per-point configuration.
+type tunPointConfig struct {
+	Name       string `json:"name"`
+	Server     string `json:"server"`
+	Port       int    `json:"port"`
+	SID        string `json:"sid"`
+	DeviceID   string `json:"deviceID"`
+	ClientData string `json:"clientData"`
+	Resource   string `json:"resource"`
+	FakeCIDR   string `json:"fakeCIDR"`
+}
+
+type tunConfigFile struct {
+	Points  []tunPointConfig `json:"points"`
+	DNSBind string           `json:"dnsBind"`
+}
+
+// savedClient is what the GUI saved at login and the helper resumes from.
+type savedClient struct {
+	Cookies  []struct{ Name, Value string } `json:"cookies"`
+	DeviceID string                         `json:"device_id"`
+}
+
+func (c savedClient) sid() string {
+	for _, ck := range c.Cookies {
+		if ck.Name == "sid" {
+			return ck.Value
+		}
+	}
+	return ""
+}
+
+// tunFakeRanges are the fake-IP blocks each access point gets in turn.
+var tunFakeRanges = []string{
+	"198.18.0.0/17", "198.18.128.0/17",
+	"198.19.0.0/17", "198.19.128.0/17",
+	"198.20.0.0/17", "198.20.128.0/17",
+	"198.21.0.0/17", "198.21.128.0/17",
+}
+
+// startGlobalTUN runs one native aTrust TUN stack per online access point, so
+// every point carries exactly its own resources, and internal names are
+// mapped back to domains inside each stack (no proxy hop).
+// ensureHelperSudo makes running helper need no password, once. It installs a
+// sudoers rule for this exact binary; if that is impossible the caller falls
+// back to the system authorization prompt.
+func (a *app) ensureHelperSudo(helper string) error {
+	const rulePath = "/etc/sudoers.d/atrust-hub"
+	marker := filepath.Join(a.dir, "sudoers-helper.txt")
+	// The rule file is root-only readable, but its presence is visible, and
+	// the marker records which binary it allows.
+	if _, err := os.Stat(rulePath); err == nil {
+		if b, rerr := os.ReadFile(marker); rerr == nil && strings.TrimSpace(string(b)) == helper {
+			return nil
+		}
+	}
+	user := os.Getenv("USER")
+	if user == "" {
+		return fmt.Errorf("找不到当前用户")
+	}
+	// sudoers wants spaces escaped, not quoted.
+	rulePathInRule := strings.ReplaceAll(helper, " ", `\ `)
+	rule := fmt.Sprintf("%s ALL=(root) NOPASSWD: %s\n", user, rulePathInRule)
+	tmp, err := os.CreateTemp("", "atrust-sudoers-*")
+	if err != nil {
+		return err
+	}
+	path := tmp.Name()
+	defer os.Remove(path)
+	if _, err := tmp.WriteString(rule); err != nil {
+		tmp.Close()
+		return err
+	}
+	tmp.Close()
+	_ = os.Chmod(path, 0o600)
+	script := fmt.Sprintf("mkdir -p /etc/sudoers.d && cp %s %s && chmod 440 %s", shQuote(path), rulePath, rulePath)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "osascript", "-e",
+		fmt.Sprintf(`do shell script "%s" with administrator privileges`, strings.ReplaceAll(script, `"`, `\"`)))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%v：%s", err, strings.TrimSpace(string(out)))
+	}
+	if _, err := os.Stat(rulePath); err != nil {
+		return fmt.Errorf("免密规则未写入")
+	}
+	_ = os.WriteFile(marker, []byte(helper+"\n"), 0o600)
+	a.tunLogf("startGlobalTUN: 已安装免密规则，之后开启 TUN 不再需要密码")
+	return nil
+}
+
+// startGlobalTUN runs one native aTrust TUN stack per online access point.
+func (a *app) startGlobalTUN(id string) {
+	a.tunLogf("startGlobalTUN: 进入 id=%s", id)
+	succeeded := false
+	defer func() {
+		if !succeeded && a.win != nil {
+			a.win.Update(func() { a.tunPending = false })
+		}
+	}()
+	if online, _, _ := a.mgr.Counts(); online == 0 {
+		a.toast = "没有在线接入点，先登录再开 TUN"
+		a.tunLogf("startGlobalTUN: 无在线接入点")
+		return
+	}
+	helper := multitunPath()
+	if _, err := os.Stat(helper); err != nil {
+		a.toast = "找不到 TUN 组件：" + helper
+		a.tunLogf("startGlobalTUN: 找不到 helper %s", helper)
+		return
+	}
+	_ = os.Chmod(helper, 0o755)
+
+	cfg := tunConfigFile{DNSBind: "127.0.0.1:53"}
+	rangeIdx := 0
+	for _, view := range a.mgr.Views() {
+		if view.State != vpn.StateOnline {
+			continue
+		}
+		point := a.cfg.Find(view.ID)
+		if point == nil {
+			continue
+		}
+		clientPath := filepath.Join(a.dir, "atrust", view.ID+".json")
+		resourcePath := filepath.Join(a.dir, "atrust", view.ID+".resource.json")
+		raw, err := os.ReadFile(clientPath)
+		if err != nil {
+			a.tunLogf("startGlobalTUN: %s 读取会话失败：%v", point.Name, err)
+			continue
+		}
+		var cd savedClient
+		if err := json.Unmarshal(raw, &cd); err != nil || cd.sid() == "" || cd.DeviceID == "" {
+			a.tunLogf("startGlobalTUN: %s 会话不完整，请重新登录", point.Name)
+			continue
+		}
+		if _, err := os.Stat(resourcePath); err != nil {
+			a.tunLogf("startGlobalTUN: %s 缺少资源文件", point.Name)
+			continue
+		}
+		fake := ""
+		if rangeIdx < len(tunFakeRanges) {
+			fake = tunFakeRanges[rangeIdx]
+		}
+		rangeIdx++
+		cfg.Points = append(cfg.Points, tunPointConfig{
+			Name: point.Name, Server: point.Server, Port: point.Port,
+			SID: cd.sid(), DeviceID: cd.DeviceID,
+			ClientData: clientPath, Resource: resourcePath, FakeCIDR: fake,
+		})
+	}
+	if len(cfg.Points) == 0 {
+		a.toast = "没有可用的登录会话，请重新登录一次"
+		a.tunLogf("startGlobalTUN: 无可恢复会话")
+		return
+	}
+	cfgPath := filepath.Join(a.dir, "tun-config.json")
+	rawCfg, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(cfgPath, rawCfg, 0o600); err != nil {
+		a.toast = "写 TUN 配置失败：" + err.Error()
+		return
+	}
+	a.tunLogf("startGlobalTUN: %d 个接入点，配置 %s", len(cfg.Points), cfgPath)
+
+	if a.sysProxyOn {
+		_ = applySystemProxy("127.0.0.1:0", false)
+		a.sysProxyOn = false
+	}
+	// Make later openings password-free; the first one may still prompt.
+	if err := a.ensureHelperSudo(helper); err != nil {
+		a.tunLogf("startGlobalTUN: 免密规则未安装：%v", err)
+	}
+
+	logPath := filepath.Join(a.dir, "tun.log")
+	pidPath := filepath.Join(a.dir, "tun.pid")
+	stopPath := filepath.Join(a.dir, "tun.stop")
+	_ = os.Remove(pidPath)
+	_ = os.Remove(stopPath)
+	_ = os.Remove(a.accessLogPath())
+
+	a.win.Update(func() { a.toast = "正在开启全局 TUN…" })
+	cmd := exec.Command("sudo", "-n", helper,
+		"-config", cfgPath,
+		"-log-file", logPath,
+		"-access-log", a.accessLogPath(),
+		"-pid-file", pidPath,
+		"-stop-file", stopPath,
+		"-gui-pid", strconv.Itoa(os.Getpid()),
+	)
+	if err := cmd.Start(); err != nil {
+		a.toast = "开启全局 TUN 失败：" + err.Error()
+		a.tunLogf("startGlobalTUN: 启动失败: %v", err)
+		return
+	}
+	go func() { _ = cmd.Wait() }()
+
+	pid := 0
+	for i := 0; i < 40; i++ {
+		time.Sleep(150 * time.Millisecond)
+		if b, err := os.ReadFile(pidPath); err == nil {
+			if v, _ := strconv.Atoi(strings.TrimSpace(string(b))); v > 0 {
+				pid = v
+				break
+			}
+		}
+	}
+	// The helper runs as root, so signalling it from this user answers EPERM
+	// when it is alive — only ESRCH means it is gone.
+	alive := false
+	if pid > 0 {
+		err := syscall.Kill(pid, 0)
+		alive = err == nil || errors.Is(err, syscall.EPERM)
+	}
+	a.tunLogf("startGlobalTUN: pid=%d alive=%v", pid, alive)
+	if !alive {
+		tail := lastLines(logPath, 12)
+		a.win.Update(func() {
+			a.tunOn = false
+			a.tunPID = 0
+			a.tunPending = false
+			a.toast = "全局 TUN 启动失败：" + tail
+		})
+		return
+	}
+	a.win.Update(func() {
+		a.tunOn = true
+		a.tunID = id
+		a.tunPID = pid
+		a.tunWanted = true
+		a.tunPending = false
+	})
+	succeeded = true
+	a.persistTunState(true, id)
+}
+
+func (a *app) persistTunState(on bool, id string) {
+	_, err := a.store.Update(func(cfg *model.Config) error {
+		cfg.Settings.TunEnabled = on
+		if on {
+			cfg.Settings.TunPointID = id
+		}
+		return nil
+	})
+	if err == nil {
+		a.cfg = a.store.Config()
+	}
+}
+
+// lastLines returns the tail of a log file for the failure toast.
+func lastLines(path string, n int) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "（读取日志失败：" + err.Error() + "）"
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, " | ")
+}
+
+func (a *app) stopGlobalTUN() {
+	stopPath := filepath.Join(a.dir, "tun.stop")
+	pidPath := filepath.Join(a.dir, "tun.pid")
+	// Ask the helper to stop through the file it watches; it restores the
+	// system DNS itself on the way out.
+	if err := os.WriteFile(stopPath, []byte("stop\n"), 0o644); err != nil {
+		a.tunLogf("stopGlobalTUN: 写停止文件失败：%v", err)
+	}
+	stopped := false
+	for i := 0; i < 50; i++ {
+		time.Sleep(100 * time.Millisecond)
+		if _, err := os.Stat(pidPath); err != nil {
+			stopped = true
+			break
+		}
+	}
+	if !stopped {
+		a.tunLogf("stopGlobalTUN: helper 未在 5 秒内退出")
+	}
+	_ = os.Remove(stopPath)
+	_ = os.Remove(pidPath)
+	a.win.Update(func() {
+		a.tunOn = false
+		a.tunPID = 0
+		a.tunPending = false
+		a.tunWanted = false
+		a.tunResumeTried = true
+		if stopped {
+			a.toast = "全局 TUN 已关闭，DNS 已恢复"
+		} else {
+			a.toast = "已请求关闭 TUN，若仍生效请稍候"
+		}
+	})
+	a.persistTunState(false, "")
+}
+
+// stopTUNQuiet kills the helper and restores DNS without touching the UI,
+// for shutdown.
+func (a *app) stopTUNQuiet() {
+	stopPath := filepath.Join(a.dir, "tun.stop")
+	_ = os.WriteFile(stopPath, []byte("stop\n"), 0o644)
+	for i := 0; i < 30; i++ {
+		time.Sleep(100 * time.Millisecond)
+		if _, err := os.Stat(filepath.Join(a.dir, "tun.pid")); err != nil {
+			break
+		}
+	}
+	_ = os.Remove(stopPath)
+}
