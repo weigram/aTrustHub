@@ -121,9 +121,6 @@ func main() {
 	// strip that block so it cannot shadow the resolver below.
 	cleanupLegacyHosts()
 
-	// Point the system at our resolver straight away; guardDNS keeps it there.
-	setSystemDNS("127.0.0.1")
-
 	var points []*point
 	for _, pc := range cfg.Points {
 		p, err := startPoint(pc, *accessLog)
@@ -135,6 +132,8 @@ func main() {
 		log.Printf("point %s ready (fake range %s)", pc.Name, pc.FakeCIDR)
 	}
 	if len(points) == 0 {
+		// Nothing runs, so leave the machine as we found it.
+		restoreSystemDNS()
 		fatal("no access point could start")
 	}
 
