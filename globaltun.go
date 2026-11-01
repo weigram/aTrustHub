@@ -164,54 +164,36 @@ func (a *app) startGlobalTUN(id string) {
 		_ = applySystemProxy("127.0.0.1:0", false)
 		a.sysProxyOn = false
 	}
-	// Make later openings password-free; the first one may still prompt.
-	if err := a.ensureHelperPrivilege(helper); err != nil {
-		a.tunLogf("startGlobalTUN: 免密规则未安装：%v", err)
-	}
-
-	// A helper left over from an earlier attempt would hold port 53 and the
-	// utun, so clear it before starting a new one.
-	if pidPath := filepath.Join(a.dir, "tun.pid"); pidPath != "" {
-		if b, err := os.ReadFile(pidPath); err == nil {
-			if old, aerr := strconv.Atoi(strings.TrimSpace(string(b))); aerr == nil && old > 0 && helperAlive(old) {
-				a.tunLogf("startGlobalTUN: 清理残留 helper pid=%d", old)
-				_ = terminateHelper(old)
-				time.Sleep(time.Second)
-			}
-		}
-	}
-
 	logPath := filepath.Join(a.dir, "tun.log")
 	pidPath := filepath.Join(a.dir, "tun.pid")
 	stopPath := filepath.Join(a.dir, "tun.stop")
+	guiPath := filepath.Join(a.dir, "gui.alive")
+	launchPath := filepath.Join(a.dir, "tun-launch.log")
 	_ = os.Remove(pidPath)
 	_ = os.Remove(stopPath)
 	_ = os.Remove(a.accessLogPath())
+	_ = os.WriteFile(guiPath, []byte("1"), 0o644)
+	a.startGUIHeartbeat(guiPath)
 
-	a.win.Update(func() { a.toast = "正在开启全局 TUN…" })
-	launchPath := filepath.Join(a.dir, "tun-launch.log")
-	launchLog, lerr := os.Create(launchPath)
-	if lerr == nil {
-		defer launchLog.Close()
-	}
-	cmd, err := helperCommand(helper, []string{
+	// Make later openings password-free; the first one may still prompt.
+	args := []string{
 		"-config", cfgPath,
 		"-log-file", logPath,
 		"-access-log", a.accessLogPath(),
 		"-pid-file", pidPath,
 		"-stop-file", stopPath,
-		"-gui-pid", strconv.Itoa(os.Getpid()),
-	}, launchLog)
-	if err != nil {
-		a.toast = "开启全局 TUN 失败：" + err.Error()
-		return
+		"-gui-file", guiPath,
 	}
-	if err := cmd.Start(); err != nil {
+	if err := a.ensureHelperPrivilege(helper, args); err != nil {
+		a.tunLogf("startGlobalTUN: 免密规则未安装：%v", err)
+	}
+
+	a.win.Update(func() { a.toast = "正在开启全局 TUN…" })
+	if err := startHelper(helper, args, launchPath); err != nil {
 		a.toast = "开启全局 TUN 失败：" + err.Error()
 		a.tunLogf("startGlobalTUN: 启动失败: %v", err)
 		return
 	}
-	go func() { _ = cmd.Wait() }()
 
 	pid := 0
 	for i := 0; i < 150; i++ {
@@ -223,8 +205,6 @@ func (a *app) startGlobalTUN(id string) {
 			}
 		}
 	}
-	// The helper runs as root, so signalling it from this user answers EPERM
-	// when it is alive — only ESRCH means it is gone.
 	alive := pid > 0 && pidFileFresh(pidPath, 8*time.Second)
 	a.tunLogf("startGlobalTUN: pid=%d alive=%v", pid, alive)
 	if !alive {
@@ -303,6 +283,20 @@ func (a *app) stopGlobalTUN() {
 		}
 	})
 	a.persistTunState(false, "")
+}
+
+// startGUIHeartbeat keeps the helper's "the app is alive" file fresh, so the
+// helper exits on its own if this process dies without cleaning up.
+func (a *app) startGUIHeartbeat(path string) {
+	a.heartbeatOnce.Do(func() {
+		go func() {
+			for {
+				now := time.Now()
+				_ = os.Chtimes(path, now, now)
+				time.Sleep(2 * time.Second)
+			}
+		}()
+	})
 }
 
 // shutdownHelper asks the helper to stop, then forces it if it lingers. It

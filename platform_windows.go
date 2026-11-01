@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"os/exec"
 	"strings"
 )
@@ -15,35 +16,64 @@ func supportsSystemProxy() bool { return true }
 // supportsElevatedTUN reports whether TUN can be started.
 func supportsElevatedTUN() bool { return true }
 
-// helperCommand builds the command that runs the TUN helper as administrator.
-// Windows shows a UAC prompt for the elevated process. Every argument is
-// quoted, because the data directory usually contains a space
-// ("AppData\Roaming\aTrust Hub").
-func helperCommand(helper string, args []string, logFile *os.File) (*exec.Cmd, error) {
-	quoted := make([]string, 0, len(args))
-	for _, a := range args {
-		quoted = append(quoted, `"`+strings.ReplaceAll(a, `"`, `""`)+`"`)
+// tunTaskName is the scheduled task that runs the helper elevated, so later
+// starts need no UAC prompt.
+const tunTaskName = "aTrustHubTUN"
+
+// taskMarker records the command line the task was created with.
+func taskMarker(dir string) string { return filepath.Join(dir, "tun-task.txt") }
+
+// startHelper runs the helper through the scheduled task: one UAC prompt the
+// first time, none afterwards.
+func startHelper(helper string, args []string, launchLog string) error {
+	if err := exec.Command("schtasks", "/Query", "/TN", tunTaskName).Run(); err != nil {
+		return fmt.Errorf("计划任务未安装：%w", err)
 	}
-	argLine := strings.ReplaceAll(strings.Join(quoted, " "), "'", "''")
-	ps := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
-try {
-  $p = Start-Process -FilePath "%s" -ArgumentList '%s' -Verb RunAs -PassThru -WindowStyle Hidden
-  Write-Output ("started " + $p.Id)
-} catch {
-  Write-Output ("error " + $_.Exception.Message)
-  exit 1
-}`, strings.ReplaceAll(helper, `"`, `""`), argLine)
-	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps)
-	if logFile != nil {
-		cmd.Stdout = logFile
-		cmd.Stderr = logFile
+	out, err := exec.Command("schtasks", "/Run", "/TN", tunTaskName).CombinedOutput()
+	_ = os.WriteFile(launchLog, out, 0o644)
+	if err != nil {
+		return fmt.Errorf("%v：%s", err, strings.TrimSpace(string(out)))
 	}
-	return cmd, nil
+	return nil
 }
 
-// ensureHelperPrivilege has nothing to install on Windows: UAC asks once per
-// start, which is handled by the elevated launch.
-func (a *app) ensureHelperPrivilege(helper string) error { return nil }
+// ensureHelperPrivilege creates the elevated scheduled task once, so later
+// starts do not ask for UAC.
+func (a *app) ensureHelperPrivilege(helper string, args []string) error {
+	cmdline := buildCommandLine(helper, args)
+	marker := taskMarker(a.dir)
+	if b, err := os.ReadFile(marker); err == nil && strings.TrimSpace(string(b)) == cmdline {
+		if exec.Command("schtasks", "/Query", "/TN", tunTaskName).Run() == nil {
+			return nil
+		}
+	}
+	// schtasks takes the whole command as one quoted argument; a small script
+	// keeps the quoting readable and runs elevated.
+	script := filepath.Join(a.dir, "tun-task.cmd")
+	body := fmt.Sprintf("@echo off\r\nschtasks /Create /TN \"%s\" /TR \"%s\" /SC ONCE /ST 00:00 /RL HIGHEST /F\r\n",
+		tunTaskName, strings.ReplaceAll(cmdline, `"`, `\"`))
+	if err := os.WriteFile(script, []byte(body), 0o644); err != nil {
+		return err
+	}
+	ps := fmt.Sprintf("Start-Process -FilePath '%s' -Verb RunAs -Wait -WindowStyle Hidden", script)
+	if out, err := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps).CombinedOutput(); err != nil {
+		return fmt.Errorf("%v：%s", err, strings.TrimSpace(string(out)))
+	}
+	if err := exec.Command("schtasks", "/Query", "/TN", tunTaskName).Run(); err != nil {
+		return fmt.Errorf("计划任务未创建成功")
+	}
+	_ = os.WriteFile(marker, []byte(cmdline+"\n"), 0o600)
+	return nil
+}
+
+// buildCommandLine quotes the helper call the way schtasks expects.
+func buildCommandLine(helper string, args []string) string {
+	parts := []string{`"` + helper + `"`}
+	for _, a := range args {
+		parts = append(parts, `"`+a+`"`)
+	}
+	return strings.Join(parts, " ")
+}
 
 // cleanupStaleDNS puts DNS back to DHCP when the helper is not running.
 func (a *app) cleanupStaleDNS() {

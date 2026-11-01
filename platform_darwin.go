@@ -21,16 +21,24 @@ func supportsSystemProxy() bool { return true }
 // supportsElevatedTUN reports whether TUN can be started with one prompt.
 func supportsElevatedTUN() bool { return true }
 
-// helperCommand builds the command that runs the TUN helper as root.
-func helperCommand(helper string, args []string, logFile *os.File) (*exec.Cmd, error) {
+// startHelper runs the TUN helper as root. The sudoers rule installed by
+// ensureHelperPrivilege makes this password-free after the first time.
+func startHelper(helper string, args []string, launchLog string) error {
 	cmd := exec.Command("sudo", append([]string{"-n", helper}, args...)...)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	return cmd, nil
+	if f, err := os.Create(launchLog); err == nil {
+		cmd.Stdout = f
+		cmd.Stderr = f
+		defer f.Close()
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() { _ = cmd.Wait() }()
+	return nil
 }
 
 // ensureHelperPrivilege installs the password-free sudoers rule once.
-func (a *app) ensureHelperPrivilege(helper string) error {
+func (a *app) ensureHelperPrivilege(helper string, args []string) error {
 	const rulePath = "/etc/sudoers.d/atrust-hub"
 	marker := filepath.Join(a.dir, "sudoers-helper.txt")
 	if _, err := os.Stat(rulePath); err == nil {

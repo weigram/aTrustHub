@@ -29,7 +29,7 @@ const version = "0.1.0"
 // app is everything the window shows and the manager that does the work.
 // appBuild is shown in the footer and the startup log so an old running
 // instance is easy to tell apart from a freshly built one.
-const appBuild = "0.20.0"
+const appBuild = "0.21.0"
 
 type app struct {
 	win   *mygo.Window
@@ -43,6 +43,12 @@ type app struct {
 	// (qr field removed: WeCom QR login uses a WebView popup now.)
 	// sysProxyOn is whether the app turned the macOS system proxy on.
 	sysProxyOn bool
+	// tray is the notification-area icon that keeps the app alive when the
+	// window is closed (Windows), and quitRequested says a quit is intended.
+	tray          *mygo.Tray
+	quitRequested bool
+	// heartbeatOnce keeps one goroutine refreshing the helper's alive file.
+	heartbeatOnce sync.Once
 	// Global TUN state.
 	tunOn  bool
 	tunPID int
@@ -261,11 +267,24 @@ func (a *app) start() {
 		BackgroundColor: "light-dark(#f7f7f9, #17181a)",
 		Content:         ui.View(a.view),
 	})
+	// Closing the window hides it instead of quitting, so the tunnels and the
+	// tray icon stay alive; 退出 in the tray menu really quits.
+	if a.tray != nil {
+		a.win.OnClose(func(e *mygo.CloseEvent) {
+			if a.quitRequested {
+				return
+			}
+			e.PreventDefault()
+			a.win.Hide()
+		})
+	}
+
 	// ZJU-Connect logs through the standard logger. Show its lines in the
 	// app's own log panel, with the time the bus adds, not two timestamps.
 	log.SetFlags(0)
 	a.bus.SetSink(a.logFile)
 	log.SetOutput(a.bus.Writer("zju"))
+	a.setupTray()
 	a.bus.SetNotify(a.invalidate)
 	go a.tailAccessLog()
 	a.mgr.Start()

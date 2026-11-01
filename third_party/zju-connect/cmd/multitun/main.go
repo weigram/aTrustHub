@@ -66,6 +66,7 @@ func main() {
 	pidFile := flag.String("pid-file", "", "write the helper's pid here")
 	stopFile := flag.String("stop-file", "", "exit when this file appears")
 	guiPID := flag.Int("gui-pid", 0, "exit when this process is gone")
+	guiFile := flag.String("gui-file", "", "exit when this heartbeat file goes stale")
 	flag.Parse()
 	if *cfgPath == "" {
 		fatal("-config is required")
@@ -157,7 +158,7 @@ func main() {
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	if *stopFile != "" || *guiPID > 0 {
+	if *stopFile != "" || *guiPID > 0 || *guiFile != "" {
 		go func() {
 			for {
 				time.Sleep(300 * time.Millisecond)
@@ -167,6 +168,17 @@ func main() {
 							_ = os.Remove(*pidFile)
 						}
 						_ = os.Remove(*stopFile)
+						stop <- syscall.SIGTERM
+						return
+					}
+				}
+				if *guiFile != "" {
+					st, err := os.Stat(*guiFile)
+					if err != nil || time.Since(st.ModTime()) > 15*time.Second {
+						log.Printf("GUI heartbeat lost, stopping")
+						if *pidFile != "" {
+							_ = os.Remove(*pidFile)
+						}
 						stop <- syscall.SIGTERM
 						return
 					}
