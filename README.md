@@ -1,5 +1,8 @@
 # aTrust Hub
 
+[![build](https://github.com/weigram/aTrustHub/actions/workflows/build.yml/badge.svg)](https://github.com/weigram/aTrustHub/actions/workflows/build.yml)
+[![release](https://img.shields.io/github/v/release/weigram/aTrustHub?display_name=tag)](https://github.com/weigram/aTrustHub/releases)
+
 **同时登录多个 aTrust 接入点**的 macOS 客户端。一个窗口里管理多个零信任网关，
 每个接入点各自保持一条独立隧道，并能按「目标属于谁」自动分流。
 
@@ -156,9 +159,19 @@ done
 
 界面右下角 **打开数据目录** 可直接定位。
 
+## 下载
+
+到 [Releases](https://github.com/weigram/aTrustHub/releases) 下载对应架构的压缩包：
+
+- `aTrustHub-darwin-arm64.zip`：Apple Silicon（M 系列）；
+- `aTrustHub-darwin-amd64.zip`：Intel Mac。
+
+解压后把 `aTrustHub.app` 拖进「应用程序」。首次打开若被 Gatekeeper 拦截，
+右键 →「打开」，或执行 `xattr -dr com.apple.quarantine /Applications/aTrustHub.app`。
+
 ## 构建
 
-需要 Go 1.22+ 与 macOS（Apple Silicon 或 Intel）。
+需要 Go 1.27+ 与 macOS（Apple Silicon 或 Intel）。
 
 ```sh
 make helpers   # 编译 TUN 辅助程序到 resources/
@@ -169,6 +182,16 @@ make test      # 单元测试
 `make helpers` 编译 `third_party/zju-connect/cmd/multitun`。这是打了补丁的
 ZJU-Connect 分支（新增企业微信认证、应用列表、会话复用、多点 TUN 等），
 编译产物不随仓库提交，需要本地生成。
+
+## 持续集成
+
+`.github/workflows/build.yml` 会在每次 push / PR 时跑测试，并同时打包
+`darwin-arm64` 与 `darwin-amd64` 两个产物；打 `v*` 标签时自动创建 Release
+并附上两个 zip。
+
+```sh
+git tag v1.0.0 && git push origin v1.0.0
+```
 
 ## 架构
 
