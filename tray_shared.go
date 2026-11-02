@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/egoist/mygo"
 )
@@ -10,14 +11,23 @@ import (
 // showWindow brings the main window back from the tray or menu bar, and puts
 // the Dock icon back on macOS.
 func (a *app) showWindow() {
-	if a.win == nil {
-		a.tunLogf("showWindow: 窗口为 nil")
-		return
+	if a.win == nil || a.win.IsDestroyed() {
+		a.tunLogf("showWindow: 重建主窗口")
+		a.createWindow()
 	}
-	a.tunLogf("showWindow: destroyed=%v visible=%v", a.win.IsDestroyed(), a.win.IsVisible())
 	a.updateDockVisibility(false)
 	a.win.Show()
 	a.win.Focus()
+	// A window that was hidden needs a fresh frame: the clickable regions of
+	// an immediate-mode UI come from the last frame, and hiding may leave them
+	// empty, which makes every click look ignored.
+	a.win.Invalidate()
+	go func() {
+		time.Sleep(120 * time.Millisecond)
+		if a.win != nil {
+			a.win.Invalidate()
+		}
+	}()
 }
 
 // quitFromTray quits for real, instead of hiding the window.

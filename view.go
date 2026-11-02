@@ -590,11 +590,14 @@ func (a *app) header(c *ui.Context) {
 				OnClick(a.openTUNLog).Tooltip("TUN 日志").Children(func() {
 				ui.Icon(c, logIcon).Size(16, 16)
 			})
-			if agg := a.mgr.Aggregate(); agg.Running && supportsSystemProxy() {
+			// Always shown, like the TUN switch: hidden controls make the app
+			// look broken. It is only disabled while the aggregate is down.
+			if supportsSystemProxy() {
+				agg := a.mgr.Aggregate()
 				a.sysProxySwitch = a.sysProxyOn
 				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-					ui.Text(c, "系统代理").FontSize(13)
-					ui.Switch(c, &a.sysProxySwitch)
+					ui.Text(c, "系统代理").FontSize(13).TextColor(t.Text)
+					ui.Switch(c, &a.sysProxySwitch).Disabled(!agg.Running)
 				})
 				if a.sysProxySwitch != a.sysProxyOn {
 					a.toggleSystemProxy()
@@ -761,6 +764,7 @@ func (a *app) pointButtons(c *ui.Context, v vpn.View) {
 		}
 	default:
 		if ui.PrimaryButton(c, "登录").Label("登录 " + v.Name).Clicked() {
+			a.tunLogf("登录点击：%s（%s）", v.Name, v.ID)
 			a.mgr.Connect(v.ID)
 		}
 	}

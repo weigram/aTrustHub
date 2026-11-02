@@ -29,7 +29,7 @@ const version = "0.1.0"
 // app is everything the window shows and the manager that does the work.
 // appBuild is shown in the footer and the startup log so an old running
 // instance is easy to tell apart from a freshly built one.
-const appBuild = "0.22.3"
+const appBuild = "0.23.0"
 
 type app struct {
 	win   *mygo.Window
@@ -260,6 +260,21 @@ func resolveDataDir() (string, error) {
 }
 
 func (a *app) start() {
+	a.createWindow()
+
+	// ZJU-Connect logs through the standard logger. Show its lines in the
+	// app's own log panel, with the time the bus adds, not two timestamps.
+	log.SetFlags(0)
+	a.bus.SetSink(a.logFile)
+	log.SetOutput(a.bus.Writer("zju"))
+	a.bus.SetNotify(a.invalidate)
+	go a.tailAccessLog()
+	a.mgr.Start()
+}
+
+// createWindow builds the main window and its handlers. It runs again when a
+// stale window was destroyed, so the app can always be reopened.
+func (a *app) createWindow() {
 	a.win = mygo.NewWindow(mygo.WindowOptions{
 		Title:           "aTrust Hub",
 		Width:           1120,
@@ -270,8 +285,6 @@ func (a *app) start() {
 		BackgroundColor: "light-dark(#f7f7f9, #17181a)",
 		Content:         ui.View(a.view),
 	})
-	// Closing the window hides it instead of quitting, so the tunnels and the
-	// tray icon stay alive; 退出 in the tray menu really quits.
 	// Closing the window hides it instead of quitting: tunnels, TUN and the
 	// tray/menu bar icon stay alive. Only 退出 really quits.
 	a.win.OnClose(func(e *mygo.CloseEvent) {
@@ -286,19 +299,13 @@ func (a *app) start() {
 	// A window on screen means a Dock icon, whatever the closing behaviour is.
 	a.updateDockVisibility(false)
 	a.startupTray()
-
-	// ZJU-Connect logs through the standard logger. Show its lines in the
-	// app's own log panel, with the time the bus adds, not two timestamps.
-	log.SetFlags(0)
-	a.bus.SetSink(a.logFile)
-	log.SetOutput(a.bus.Writer("zju"))
-	a.bus.SetNotify(a.invalidate)
-	go a.tailAccessLog()
-	a.mgr.Start()
 }
 
 func (a *app) shutdown() {
 	a.shutdownOnce.Do(func() {
+		// A real quit: window closes must go through, or macOS cancels the
+		// termination and the process stays alive with no usable UI.
+		a.quitRequested = true
 		if a.tunOn {
 			a.stopTUNQuiet()
 			a.tunOn = false

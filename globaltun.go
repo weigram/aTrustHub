@@ -357,5 +357,6 @@ func (a *app) shutdownHelper(wait time.Duration) bool {
 // stopTUNQuiet kills the helper and restores DNS without touching the UI,
 // for shutdown.
 func (a *app) stopTUNQuiet() {
-	_ = a.shutdownHelper(6 * time.Second)
+	// Keep quitting responsive: ask the helper to leave, don't wait long.
+	_ = a.shutdownHelper(2 * time.Second)
 }
