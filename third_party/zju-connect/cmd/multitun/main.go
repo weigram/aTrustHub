@@ -62,6 +62,16 @@ type hub struct {
 	nextIndex int
 }
 
+// addDomains records the internal domains a point can resolve, so public
+// names go straight to the underlay instead of waiting on a tunnel lookup.
+func (h *hub) addDomains(domains map[string][]client.DomainResource) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for name := range domains {
+		h.dns.addInternalDomain(name)
+	}
+}
+
 // add starts one access point unless it is already running.
 func (h *hub) add(pc pointConfig) error {
 	h.mu.Lock()
@@ -77,6 +87,11 @@ func (h *hub) add(pc pointConfig) error {
 	}
 	h.points[pc.Name] = p
 	h.dns.Add(p.dns)
+	if domains, err := p.client.DomainResources(); err == nil {
+		for name := range domains {
+			h.dns.addInternalDomain(name)
+		}
+	}
 	log.Printf("point %s ready (fake range %s)", pc.Name, pc.FakeCIDR)
 	return nil
 }
@@ -297,8 +312,12 @@ func startPoint(pc pointConfig, accessLog string, index int) (*point, error) {
 	if err != nil {
 		return nil, fmt.Errorf("underlay: %w", err)
 	}
+	// No SID here on purpose: the saved one goes stale after a while and the
+	// server then rejects the IP tunnel with "Invalid arguments". Leaving it
+	// empty makes the client authenticate with the saved cookies and pick up a
+	// fresh session, which is cheap and always correct.
 	cli := atrustclient.NewClient(atrustclient.ClientOptions{
-		Session: atrustclient.SessionOptions{SID: pc.SID, DeviceID: pc.DeviceID},
+		Session:        atrustclient.SessionOptions{DeviceID: pc.DeviceID},
 		UnderlayDialer: under,
 	})
 	if _, err := cli.Setup(atrustclient.SetupOptions{
@@ -427,8 +446,37 @@ func rangePrefixes(loIP, hiIP net.IP) []string {
 // multiDNS asks each point's resolver in turn, so the fake IP a name gets
 // belongs to the point that can carry it.
 type multiDNS struct {
-	mu      sync.Mutex
-	servers []zcdns.LocalServer
+	mu       sync.Mutex
+	servers  []zcdns.LocalServer
+	internal map[string]bool
+}
+
+// addInternalDomain marks a domain as resolvable through a point.
+func (m *multiDNS) addInternalDomain(name string) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return
+	}
+	m.mu.Lock()
+	if m.internal == nil {
+		m.internal = map[string]bool{}
+	}
+	m.internal[name] = true
+	m.mu.Unlock()
+}
+
+// isInternal reports whether a name belongs to an access point.
+func (m *multiDNS) isInternal(name string) bool {
+	name = strings.ToLower(strings.TrimSuffix(name, "."))
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for domain := range m.internal {
+		d := strings.TrimPrefix(domain, "*.")
+		if name == d || strings.HasSuffix(name, "."+d) {
+			return true
+		}
+	}
+	return false
 }
 
 // Add makes a resolver answer through this listener from now on.
@@ -446,6 +494,18 @@ func (m *multiDNS) snapshot() []zcdns.LocalServer {
 
 func (m *multiDNS) HandleDnsMsg(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
 	list := m.snapshot()
+	if len(msg.Question) > 0 {
+		name := msg.Question[0].Name
+		// Public names never wait for a tunnel lookup: that lookup can hang,
+		// and while it hangs every browser request looks like a dead network.
+		if !m.isInternal(name) {
+			// Only take a real answer: NXDOMAIN here may just mean the name is
+			// internal to a point, and the point resolvers come next.
+			if reply, err := forwardUpstream(ctx, msg); err == nil && reply != nil && len(reply.Answer) > 0 {
+				return reply, nil
+			}
+		}
+	}
 	for _, s := range list {
 		reply, err := s.HandleDnsMsg(ctx, msg)
 		if err == nil && reply != nil && len(reply.Answer) > 0 {
