@@ -29,7 +29,7 @@ const version = "0.1.0"
 // app is everything the window shows and the manager that does the work.
 // appBuild is shown in the footer and the startup log so an old running
 // instance is easy to tell apart from a freshly built one.
-const appBuild = "0.22.2"
+const appBuild = "0.22.3"
 
 type app struct {
 	win   *mygo.Window
@@ -275,6 +275,7 @@ func (a *app) start() {
 	// Closing the window hides it instead of quitting: tunnels, TUN and the
 	// tray/menu bar icon stay alive. Only 退出 really quits.
 	a.win.OnClose(func(e *mygo.CloseEvent) {
+		a.tunLogf("OnClose: quitRequested=%v", a.quitRequested)
 		if a.quitRequested {
 			return
 		}

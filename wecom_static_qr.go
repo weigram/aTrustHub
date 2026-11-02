@@ -9,6 +9,7 @@ import (
 	"html"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -146,6 +147,9 @@ func openStaticQRWindow(ctx context.Context, title, instruction string, png []by
 		}
 	})
 	page.LoadHTML(wecomStaticHTML(title, instruction, png, showLocalBtn), "")
+	// Activate the app first: a new window created while the app is in the
+	// background can open behind other apps, which looks like nothing happened.
+	mygo.App.Focus()
 	win.Show()
 	win.Focus()
 
@@ -213,7 +217,9 @@ func (a *app) wecomStaticQRLogin(ctx context.Context, pointName, server, loginUR
 	}
 	logLine("企业微信网页登录参数已读取")
 
-	// Fetch the QR image (same key the official page uses).
+	// Fetch the QR image (same key the official page uses). The deadline keeps
+	// a stalled connection from leaving the click with no visible reaction.
+	logLine("开始获取二维码图片：%s", qrHost(settings.QRURL))
 	png, err := fetchWeComQRImage(ctx, settings)
 	if err != nil {
 		logLine("获取二维码图片失败：%v", err)
@@ -387,7 +393,7 @@ func fetchWeComQRImage(ctx context.Context, settings wwLoginSettings) ([]byte, e
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0")
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 8 * time.Second}).Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -397,6 +403,15 @@ func fetchWeComQRImage(ctx context.Context, settings wwLoginSettings) ([]byte, e
 		return nil, errors.New("二维码图片为空")
 	}
 	return b, nil
+}
+
+// qrHost is the host of a QR URL, for logs.
+func qrHost(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw
+	}
+	return u.Host
 }
 
 // pollQyWechatStatic polls the older QR status from Go and returns the code.

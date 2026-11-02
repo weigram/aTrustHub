@@ -11,8 +11,10 @@ import (
 // the Dock icon back on macOS.
 func (a *app) showWindow() {
 	if a.win == nil {
+		a.tunLogf("showWindow: 窗口为 nil")
 		return
 	}
+	a.tunLogf("showWindow: destroyed=%v visible=%v", a.win.IsDestroyed(), a.win.IsVisible())
 	a.updateDockVisibility(false)
 	a.win.Show()
 	a.win.Focus()

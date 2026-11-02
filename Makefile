@@ -17,7 +17,7 @@ export GOMODCACHE ?= $(CACHE)/mod
 export GOTMPDIR   ?= $(CACHE)/tmp
 endif
 
-.PHONY: all run dev test vet fmt helpers build dmg clean
+.PHONY: all run dev test vet fmt helpers helpers-all build dmg clean
 
 all: run
 
@@ -41,8 +41,12 @@ vet:
 fmt:
 	$(GO) fmt ./...
 
-## helpers: 编译 third_party/zju-connect 里的 TUN 辅助程序到 resources/
+## helpers: 本机用：只为 darwin-arm64 编译 TUN 辅助程序（最快）
 helpers:
+	cd third_party/zju-connect && GOOS=darwin GOARCH=arm64 $(GO) build -o ../../resources/darwin-arm64/zju-connect-multitun ./cmd/multitun
+
+## helpers-all: 编译全部平台的辅助程序（发版用，CI 也会做）
+helpers-all:
 	cd third_party/zju-connect && GOOS=darwin GOARCH=arm64 $(GO) build -o ../../resources/darwin-arm64/zju-connect-multitun ./cmd/multitun
 	cd third_party/zju-connect && GOOS=darwin GOARCH=amd64 $(GO) build -o ../../resources/darwin-amd64/zju-connect-multitun ./cmd/multitun
 	cd third_party/zju-connect && GOOS=windows GOARCH=amd64 $(GO) build -ldflags "-H=windowsgui" -o ../../resources/windows-amd64/zju-connect-multitun.exe ./cmd/multitun
