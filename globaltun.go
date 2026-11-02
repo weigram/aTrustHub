@@ -90,27 +90,8 @@ var tunFakeRanges = []string{
 // back to the system authorization prompt.
 
 // startGlobalTUN runs one native aTrust TUN stack per online access point.
-func (a *app) startGlobalTUN(id string) {
-	a.tunLogf("startGlobalTUN: 进入 id=%s", id)
-	succeeded := false
-	defer func() {
-		if !succeeded && a.win != nil {
-			a.win.Update(func() { a.tunPending = false })
-		}
-	}()
-	if online, _, _ := a.mgr.Counts(); online == 0 {
-		a.toast = "没有在线接入点，先登录再开 TUN"
-		a.tunLogf("startGlobalTUN: 无在线接入点")
-		return
-	}
-	helper := multitunPath()
-	if _, err := os.Stat(helper); err != nil {
-		a.toast = "找不到 TUN 组件：" + helper
-		a.tunLogf("startGlobalTUN: 找不到 helper %s", helper)
-		return
-	}
-	_ = os.Chmod(helper, 0o755)
-
+// tunConfigFor builds the helper configuration from the online access points.
+func (a *app) tunConfigFor() (tunConfigFile, error) {
 	cfg := tunConfigFile{DNSBind: "127.0.0.1:53"}
 	rangeIdx := 0
 	for _, view := range a.mgr.Views() {
@@ -149,9 +130,50 @@ func (a *app) startGlobalTUN(id string) {
 		})
 	}
 	if len(cfg.Points) == 0 {
+		return cfg, fmt.Errorf("没有可用的登录会话，请重新登录一次")
+	}
+	return cfg, nil
+}
+
+func (a *app) startGlobalTUN(id string) {
+	if a.win == nil {
+		a.tunLogf("startGlobalTUN: 主窗口还没创建，跳过 id=%s", id)
+		return
+	}
+	a.tunLogf("startGlobalTUN: 进入 id=%s", id)
+	succeeded := false
+	defer func() {
+		if !succeeded && a.win != nil {
+			a.win.Update(func() { a.tunPending = false })
+		}
+	}()
+	if online, _, _ := a.mgr.Counts(); online == 0 {
+		a.toast = "没有在线接入点，先登录再开 TUN"
+		a.tunLogf("startGlobalTUN: 无在线接入点")
+		return
+	}
+	helper := multitunPath()
+	if _, err := os.Stat(helper); err != nil {
+		a.toast = "找不到 TUN 组件：" + helper
+		a.tunLogf("startGlobalTUN: 找不到 helper %s", helper)
+		return
+	}
+	_ = os.Chmod(helper, 0o755)
+
+	cfg, err := a.tunConfigFor()
+	if err != nil {
+		a.toast = err.Error()
+		a.tunLogf("startGlobalTUN: %v", err)
+		return
+	}
+	if len(cfg.Points) == 0 {
 		a.toast = "没有可用的登录会话，请重新登录一次"
 		a.tunLogf("startGlobalTUN: 无可恢复会话")
 		return
+	}
+	if pidFileFresh(filepath.Join(a.dir, "tun.pid"), 10*time.Second) {
+		a.tunLogf("startGlobalTUN: 检测到仍在运行的 TUN 组件，先停掉再启动")
+		_ = a.shutdownHelper(3 * time.Second)
 	}
 	cfgPath := filepath.Join(a.dir, "tun-config.json")
 	rawCfg, _ := json.MarshalIndent(cfg, "", "  ")
@@ -184,6 +206,7 @@ func (a *app) startGlobalTUN(id string) {
 		"-pid-file", pidPath,
 		"-stop-file", stopPath,
 		"-gui-file", guiPath,
+		"-reload-file", filepath.Join(a.dir, "tun.reload"),
 	}
 	privileged := true
 	if err := a.ensureHelperPrivilege(helper, args); err != nil {
@@ -234,6 +257,7 @@ func (a *app) startGlobalTUN(id string) {
 		a.tunWanted = true
 		a.tunPending = false
 		a.tunPoints = a.onlineSnapshot()
+		a.tunMirror()
 	})
 	succeeded = true
 	a.persistTunState(true, id)
@@ -256,39 +280,129 @@ func (a *app) onlineSnapshot() string {
 // longer matches the one it was started with, so a point logged in after TUN
 // was switched on also gets its subnets routed. Rebuilds are debounced: a
 // three-point login storm must not restart the tunnel three times.
+// tunMirror copies the UI-owned TUN state into the atomics that background
+// goroutines read.
+func (a *app) tunMirror() {
+	a.tunOnA.Store(a.tunOn)
+	a.tunPendingA.Store(a.tunPending)
+	a.tunPointsA.Store(a.tunPoints)
+	a.tunIDA.Store(a.tunID)
+}
+
 func (a *app) maybeRefreshTUN() {
-	var on, pending, refreshing bool
-	var snap string
-	a.win.Update(func() {
-		on, pending, refreshing, snap = a.tunOn, a.tunPending, a.tunRefreshing, a.tunPoints
-	})
-	if !on || pending || refreshing {
+	if a.win == nil {
 		return
 	}
-	if a.onlineSnapshot() == snap {
+	snap, _ := a.tunPointsA.Load().(string)
+	if !a.tunOnA.Load() || a.tunPendingA.Load() {
 		return
 	}
-	a.win.Update(func() { a.tunRefreshing = true })
+	now := a.onlineSnapshot()
+	if now == snap {
+		return
+	}
+	// One rebuild at a time: the ticker and every log line can land here at
+	// the same moment, and two helpers on one machine fight over routes.
+	if !a.tunGate.CompareAndSwap(false, true) {
+		return
+	}
 	go func() {
-		defer a.win.Update(func() { a.tunRefreshing = false })
+		defer a.tunGate.Store(false)
 		time.Sleep(3 * time.Second)
-		var stillOn, stillPending bool
-		a.win.Update(func() { stillOn, stillPending = a.tunOn, a.tunPending })
-		if !stillOn || stillPending {
+		if !a.tunOnA.Load() || a.tunPendingA.Load() {
 			return
 		}
-		if a.onlineSnapshot() == a.tunPoints {
+		if a.onlineSnapshot() == a.tunPointsA.Load().(string) {
 			return
 		}
-		a.tunLogf("TUN 刷新：在线接入点变化（%s → %s），重建隧道", a.tunPoints, a.onlineSnapshot())
-		a.win.Update(func() {
+		prev, _ := a.tunPointsA.Load().(string)
+		nowSnap := a.onlineSnapshot()
+		a.tunLogf("TUN 刷新：在线接入点变化（%s → %s）", prev, nowSnap)
+		a.tunSeq.Lock()
+		added, err := a.extendTUN(prev, nowSnap)
+		if err == nil && added {
+			a.tunPointsA.Store(nowSnap)
+			go a.win.Update(func() {
+				a.tunPoints = nowSnap
+				a.tunPending = false
+			})
+			a.tunSeq.Unlock()
+			return
+		}
+		// Points were removed, or extending failed: rebuild from scratch.
+		a.tunLogf("TUN 刷新：改为整体重建（%v）", err)
+		a.tunPendingA.Store(true)
+		a.tunOnA.Store(false)
+		go a.win.Update(func() {
 			a.tunPending = true
 			a.tunOn = false
 			a.tunPID = 0
 		})
 		_ = a.shutdownHelper(3 * time.Second)
 		a.startGlobalTUN(a.tunID)
+		a.tunSeq.Unlock()
 	}()
+}
+
+// extendTUN adds the newly online points to the running helper without
+// touching the tunnels that already work: the helper re-reads the config when
+// a reload file appears. It reports whether a reload was requested.
+func (a *app) extendTUN(prev, now string) (bool, error) {
+	if prev == "" {
+		return false, fmt.Errorf("没有已建立的隧道")
+	}
+	if !pidFileFresh(filepath.Join(a.dir, "tun.pid"), 10*time.Second) {
+		return false, fmt.Errorf("TUN 组件未在运行")
+	}
+	prevSet := strings.Split(prev, ",")
+	known := map[string]bool{}
+	for _, id := range prevSet {
+		known[id] = true
+	}
+	_ = known
+	// Every previously online point must still be online: a removal needs a
+	// different tunnel set, which only a rebuild can provide.
+	for _, id := range prevSet {
+		found := false
+		for _, cur := range strings.Split(now, ",") {
+			if cur == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false, fmt.Errorf("有接入点离线")
+		}
+	}
+	cfg, err := a.tunConfigFor()
+	if err != nil {
+		return false, err
+	}
+	cfgPath := filepath.Join(a.dir, "tun-config.json")
+	raw, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(cfgPath, raw, 0o600); err != nil {
+		return false, err
+	}
+	reload := filepath.Join(a.dir, "tun.reload")
+	if err := os.WriteFile(reload, []byte("reload\n"), 0o644); err != nil {
+		return false, err
+	}
+	a.tunLogf("TUN 增量：已请求 helper 加入新接入点，现有点保持不变")
+	return true, nil
+}
+
+// startTUNSerialized and stopTUNSerialized keep manual switch flips from
+// overlapping an automatic rebuild.
+func (a *app) startTUNSerialized(id string) {
+	a.tunSeq.Lock()
+	defer a.tunSeq.Unlock()
+	a.startGlobalTUN(id)
+}
+
+func (a *app) stopTUNSerialized() {
+	a.tunSeq.Lock()
+	defer a.tunSeq.Unlock()
+	a.stopGlobalTUN()
 }
 
 // pidFileFresh reports whether the helper wrote its pid file recently. The
@@ -336,6 +450,7 @@ func (a *app) stopGlobalTUN() {
 		a.tunPending = false
 		a.tunWanted = false
 		a.tunPoints = ""
+		a.tunMirror()
 		a.tunResumeTried = true
 		if stopped {
 			a.toast = "全局 TUN 已关闭，DNS 已恢复"

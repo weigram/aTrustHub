@@ -92,6 +92,8 @@ func (s *Stack) AddRoute(target string) error {
 		return fmt.Errorf("not a valid IPv4 address")
 	}
 
+	// Drop a route an earlier helper left behind; otherwise the add fails.
+	_ = hiddenCmd("route", "delete", ip.String()).Run()
 	command := hiddenCmd("route", "add", ip.String(), "mask", net.IP(ipv4Net.Mask).String(), s.endpoint.ip.String(), "metric", "1")
 	err = command.Run()
 	if err != nil {

@@ -4,6 +4,8 @@
 package main
 
 import (
+	"sync/atomic"
+	"time"
 	"context"
 	"encoding/json"
 	"errors"
@@ -29,7 +31,7 @@ const version = "0.1.0"
 // app is everything the window shows and the manager that does the work.
 // appBuild is shown in the footer and the startup log so an old running
 // instance is easy to tell apart from a freshly built one.
-const appBuild = "0.23.1"
+const appBuild = "0.24.0"
 
 type app struct {
 	win   *mygo.Window
@@ -59,8 +61,18 @@ type app struct {
 	tunResumeTried bool
 	// tunPoints is the online-point snapshot the helper was started with.
 	tunPoints string
-	// tunRefreshing guards the debounced rebuild goroutine.
-	tunRefreshing bool
+	// tunDiag rate-limits the rebuild diagnostics to state changes.
+	tunDiag string
+	// tunGate makes sure only one automatic rebuild runs at a time.
+	tunGate atomic.Bool
+	// tunSeq serializes starting and stopping the helper.
+	tunSeq sync.Mutex
+	// Mirrors of the TUN state, so a background goroutine can read it without
+	// hopping to the UI thread (win.Update from a plain goroutine can block).
+	tunOnA      atomic.Bool
+	tunPendingA atomic.Bool
+	tunPointsA  atomic.Value
+	tunIDA      atomic.Value
 	// tunPending is true while a start/stop is in flight, so the switch keeps
 	// the position the user chose until the async result lands.
 	tunPending bool
@@ -207,7 +219,12 @@ func newApp() (*app, error) {
 	if logPath == "" {
 		logPath = filepath.Join(dir, "app.log")
 	}
-	if f, err := os.Create(logPath); err == nil {
+	// Append, not truncate: restarting the app used to wipe the record of what
+	// went wrong right before the restart. Keep the file at a sane size.
+	if st, err := os.Stat(logPath); err == nil && st.Size() > 4<<20 {
+		_ = os.Rename(logPath, logPath+".1")
+	}
+	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
 		a.logFile = f
 	}
 	a.cfg = st.Config()
@@ -274,6 +291,24 @@ func (a *app) start() {
 	a.bus.SetNotify(a.invalidate)
 	go a.tailAccessLog()
 	a.mgr.Start()
+
+	// A slow tick makes TUN follow the online set even when no log line or
+	// click happens to trigger a repaint.
+	go func() {
+		last := time.Now()
+		for range time.Tick(3 * time.Second) {
+			a.maybeRefreshTUN()
+			if time.Since(last) > 60*time.Second {
+				last = time.Now()
+				a.tunLogf("巡检：on=%v pending=%v 已建=%q 当前=%q", a.tunOn, a.tunPending, a.tunPoints, a.onlineSnapshot())
+			}
+		}
+	}()
+
+	// Make sure the first window is on screen even if the remembered state or
+	// an early activation left it hidden.
+	a.win.Show()
+	a.win.Focus()
 }
 
 // createWindow builds the main window and its handlers. It runs again when a

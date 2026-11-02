@@ -53,6 +53,9 @@ func (ep *Endpoint) Read(buf []byte) (int, error) {
 }
 
 func (s *Stack) AddRoute(target string) error {
+	// A route left by an earlier helper would make this one fail, so drop any
+	// stale entry for the same network first.
+	_ = exec.Command("route", "-n", "delete", "-net", target).Run()
 	command := exec.Command("route", "-n", "add", "-net", target, "-interface", s.endpoint.ifceName)
 	err := command.Run()
 	if err != nil {

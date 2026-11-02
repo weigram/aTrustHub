@@ -52,6 +52,65 @@ type tunConfig struct {
 	DNSBind string        `json:"dnsBind"`
 }
 
+// hub owns the running stacks, so a new access point can join while the
+// others keep their tunnels.
+type hub struct {
+	mu        sync.Mutex
+	points    map[string]*point
+	dns       *multiDNS
+	accessLog string
+	nextIndex int
+}
+
+// add starts one access point unless it is already running.
+func (h *hub) add(pc pointConfig) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, ok := h.points[pc.Name]; ok {
+		return nil
+	}
+	index := h.nextIndex
+	h.nextIndex++
+	p, err := startPoint(pc, h.accessLog, index)
+	if err != nil {
+		return err
+	}
+	h.points[pc.Name] = p
+	h.dns.Add(p.dns)
+	log.Printf("point %s ready (fake range %s)", pc.Name, pc.FakeCIDR)
+	return nil
+}
+
+// count reports how many access points are running.
+func (h *hub) count() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.points)
+}
+
+// reloadConfig adds the points a new configuration introduced. Points that
+// disappeared are left running: tearing a tunnel down and immediately opening
+// another for the same session is refused by the server.
+func reloadConfig(path string, h *hub) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("reload: read %s: %v", path, err)
+		return
+	}
+	var cfg tunConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		log.Printf("reload: parse %s: %v", path, err)
+		return
+	}
+	for _, pc := range cfg.Points {
+		if err := h.add(pc); err != nil {
+			log.Printf("reload: point %s: %v", pc.Name, err)
+			continue
+		}
+		log.Printf("reload: point %s joined", pc.Name)
+	}
+}
+
 type point struct {
 	cfg    pointConfig
 	client *atrustclient.Client
@@ -67,6 +126,7 @@ func main() {
 	stopFile := flag.String("stop-file", "", "exit when this file appears")
 	guiPID := flag.Int("gui-pid", 0, "exit when this process is gone")
 	guiFile := flag.String("gui-file", "", "exit when this heartbeat file goes stale")
+	reloadFile := flag.String("reload-file", "", "re-read the config when this file appears")
 	flag.Parse()
 	if *cfgPath == "" {
 		fatal("-config is required")
@@ -122,39 +182,55 @@ func main() {
 	// strip that block so it cannot shadow the resolver below.
 	cleanupLegacyHosts()
 
-	var points []*point
-	for i, pc := range cfg.Points {
-		p, err := startPoint(pc, *accessLog, i)
-		if err != nil {
-			log.Printf("point %s: %v", pc.Name, err)
-			continue
-		}
-		points = append(points, p)
-		log.Printf("point %s ready (fake range %s)", pc.Name, pc.FakeCIDR)
+	// Points are added to the hub one by one: a point logged in later joins
+	// without disturbing the tunnels that already work.
+	hub := &hub{points: map[string]*point{}, dns: &multiDNS{}, accessLog: *accessLog}
+	dnsReady := true
+	if err := startDNS(cfg.DNSBind, hub.dns); err != nil {
+		dnsReady = false
+		log.Printf("DNS %s 无法监听：%v（不改系统 DNS，避免断网）", cfg.DNSBind, err)
 	}
-	if len(points) == 0 {
+	for _, pc := range cfg.Points {
+		if err := hub.add(pc); err != nil {
+			log.Printf("point %s: %v", pc.Name, err)
+		}
+	}
+	if hub.count() == 0 {
 		// Nothing runs, so leave the machine as we found it.
 		restoreSystemDNS()
 		fatal("no access point could start")
 	}
-
-	// One DNS listener answers for every point: it asks each point's resolver
-	// in turn, and the fake IP it returns belongs to that point's range, so
-	// the route picks the right tunnel.
-	servers := make([]zcdns.LocalServer, 0, len(points))
-	for _, p := range points {
-		servers = append(servers, p.dns)
-	}
-	startDNS(cfg.DNSBind, servers)
 	// A point's stack may take the system DNS over while starting, so claim it
-	// again once every point is up.
-	setSystemDNS("127.0.0.1")
+	// again once every point is up — but only if our resolver really listens.
+	if dnsReady {
+		setSystemDNS("127.0.0.1")
+	} else {
+		restoreSystemDNS()
+	}
+
+	// The GUI adds a point by rewriting the config and touching this file, so
+	// an existing tunnel is never torn down for a newcomer.
+	if *reloadFile != "" {
+		go func() {
+			for {
+				time.Sleep(500 * time.Millisecond)
+				if _, err := os.Stat(*reloadFile); err != nil {
+					continue
+				}
+				_ = os.Remove(*reloadFile)
+				log.Printf("reload: config changed, adding new points")
+				reloadConfig(*cfgPath, hub)
+			}
+		}()
+	}
 
 	// Keep the system pointed at our resolver: the aTrust stack's DNS setup
 	// can move the service DNS back to the tunnel's own server, which cannot
 	// answer internal names for the rest of the system.
 	stopGuard := make(chan struct{})
-	go guardDNS(stopGuard, "127.0.0.1")
+	if dnsReady {
+		go guardDNS(stopGuard, "127.0.0.1")
+	}
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
@@ -199,9 +275,11 @@ func main() {
 	restoreSystemDNS()
 	log.Printf("stopped")
 	log.Println("shutting down")
-	for _, p := range points {
+	hub.mu.Lock()
+	for _, p := range hub.points {
 		p.client.Close()
 	}
+	hub.mu.Unlock()
 }
 
 // startPoint resumes one access point and starts its TUN stack.
@@ -349,29 +427,66 @@ func rangePrefixes(loIP, hiIP net.IP) []string {
 // multiDNS asks each point's resolver in turn, so the fake IP a name gets
 // belongs to the point that can carry it.
 type multiDNS struct {
+	mu      sync.Mutex
 	servers []zcdns.LocalServer
 }
 
+// Add makes a resolver answer through this listener from now on.
+func (m *multiDNS) Add(server zcdns.LocalServer) {
+	m.mu.Lock()
+	m.servers = append(m.servers, server)
+	m.mu.Unlock()
+}
+
+func (m *multiDNS) snapshot() []zcdns.LocalServer {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]zcdns.LocalServer(nil), m.servers...)
+}
+
 func (m *multiDNS) HandleDnsMsg(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
-	for _, s := range m.servers {
+	list := m.snapshot()
+	for _, s := range list {
 		reply, err := s.HandleDnsMsg(ctx, msg)
 		if err == nil && reply != nil && len(reply.Answer) > 0 {
 			return reply, nil
 		}
 	}
+	// Not an internal name: resolve it on the underlay. Going through a point's
+	// resolver here used to make ordinary sites (百度、知乎…) fail while TUN was
+	// on, because nothing outside the VPN could answer.
+	if reply, err := forwardUpstream(ctx, msg); err == nil {
+		return reply, nil
+	}
 	// Nothing internal answered: let the first resolver forward upstream.
-	if len(m.servers) > 0 {
-		return m.servers[0].HandleDnsMsg(ctx, msg)
+	if len(list) > 0 {
+		return list[0].HandleDnsMsg(ctx, msg)
 	}
 	return nil, fmt.Errorf("no resolver")
 }
 
+// publicDNS are resolvers reachable without the tunnel.
+var publicDNS = []string{"223.5.5.5:53", "119.29.29.29:53", "1.1.1.1:53"}
+
+// forwardUpstream resolves a name outside the VPN, straight over the underlay.
+func forwardUpstream(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
+	q := msg.Copy()
+	client := &dns.Client{Timeout: 2 * time.Second}
+	for _, addr := range publicDNS {
+		reply, _, err := client.ExchangeContext(ctx, q, addr)
+		if err == nil && reply != nil {
+			return reply, nil
+		}
+	}
+	return nil, fmt.Errorf("no public resolver answered")
+}
+
 func (m *multiDNS) CheckDnsHijack(dstIP net.IP) bool { return true }
 
-func startDNS(bind string, servers []zcdns.LocalServer) {
+func startDNS(bind string, servers *multiDNS) error {
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
 		ctx := context.WithValue(context.Background(), resolve.ContextKeyFakeIP, true)
-		reply, err := (&multiDNS{servers: servers}).HandleDnsMsg(ctx, req)
+		reply, err := servers.HandleDnsMsg(ctx, req)
 		if err != nil || reply == nil {
 			m := new(dns.Msg)
 			m.SetRcode(req, dns.RcodeServerFailure)
@@ -381,17 +496,26 @@ func startDNS(bind string, servers []zcdns.LocalServer) {
 		reply.Id = req.Id
 		_ = w.WriteMsg(reply)
 	})
+	// Bind before reporting success: pointing the system at a port nobody
+	// listens on would look exactly like the network being down.
+	conn, err := net.ListenPacket("udp", bind)
+	if err != nil {
+		return fmt.Errorf("udp %s: %w", bind, err)
+	}
+	srvUDP := &dns.Server{PacketConn: conn, Handler: handler}
 	go func() {
-		if err := (&dns.Server{Addr: bind, Net: "udp", Handler: handler}).ListenAndServe(); err != nil {
+		if err := srvUDP.ActivateAndServe(); err != nil {
 			log.Printf("DNS udp %s: %v", bind, err)
 		}
 	}()
+	srvTCP := &dns.Server{Addr: bind, Net: "tcp", Handler: handler}
 	go func() {
-		if err := (&dns.Server{Addr: bind, Net: "tcp", Handler: handler}).ListenAndServe(); err != nil {
+		if err := srvTCP.ListenAndServe(); err != nil {
 			log.Printf("DNS tcp %s: %v", bind, err)
 		}
 	}()
 	log.Printf("DNS listening on %s", bind)
+	return nil
 }
 
 // guardDNS keeps every network service pointed at addr while TUN is up.

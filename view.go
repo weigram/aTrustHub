@@ -575,13 +575,13 @@ func (a *app) header(c *ui.Context) {
 					a.tunLogf("TUN开关点击: on=%v shown=%v", a.tunSwitch, shown)
 					if a.tunSwitch {
 						if pid := a.firstOnlinePoint(); pid != "" {
-							go a.startGlobalTUN(pid)
+							go a.startTUNSerialized(pid)
 						} else {
 							a.tunPending = false
 							a.toast = "没有在线接入点，先登录再开 TUN"
 						}
 					} else {
-						go a.stopGlobalTUN()
+						go a.stopTUNSerialized()
 					}
 					a.invalidate()
 				}
