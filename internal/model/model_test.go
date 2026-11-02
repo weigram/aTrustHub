@@ -199,4 +199,3 @@ func TestSecretStoreSetting(t *testing.T) {
 		t.Errorf("keychain kept? %q %v", s.SecretStore, err)
 	}
 }
-
