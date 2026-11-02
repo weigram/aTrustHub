@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sort"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -232,9 +233,62 @@ func (a *app) startGlobalTUN(id string) {
 		a.tunPID = pid
 		a.tunWanted = true
 		a.tunPending = false
+		a.tunPoints = a.onlineSnapshot()
 	})
 	succeeded = true
 	a.persistTunState(true, id)
+}
+
+// onlineSnapshot is the set of access points the TUN helper was built for. It
+// changes whenever a point logs in or out, which is the trigger for a rebuild.
+func (a *app) onlineSnapshot() string {
+	ids := make([]string, 0, 4)
+	for _, v := range a.mgr.Views() {
+		if v.State == vpn.StateOnline {
+			ids = append(ids, v.ID)
+		}
+	}
+	sort.Strings(ids)
+	return strings.Join(ids, ",")
+}
+
+// maybeRefreshTUN rebuilds the TUN helper when the set of online points no
+// longer matches the one it was started with, so a point logged in after TUN
+// was switched on also gets its subnets routed. Rebuilds are debounced: a
+// three-point login storm must not restart the tunnel three times.
+func (a *app) maybeRefreshTUN() {
+	var on, pending, refreshing bool
+	var snap string
+	a.win.Update(func() {
+		on, pending, refreshing, snap = a.tunOn, a.tunPending, a.tunRefreshing, a.tunPoints
+	})
+	if !on || pending || refreshing {
+		return
+	}
+	if a.onlineSnapshot() == snap {
+		return
+	}
+	a.win.Update(func() { a.tunRefreshing = true })
+	go func() {
+		defer a.win.Update(func() { a.tunRefreshing = false })
+		time.Sleep(3 * time.Second)
+		var stillOn, stillPending bool
+		a.win.Update(func() { stillOn, stillPending = a.tunOn, a.tunPending })
+		if !stillOn || stillPending {
+			return
+		}
+		if a.onlineSnapshot() == a.tunPoints {
+			return
+		}
+		a.tunLogf("TUN 刷新：在线接入点变化（%s → %s），重建隧道", a.tunPoints, a.onlineSnapshot())
+		a.win.Update(func() {
+			a.tunPending = true
+			a.tunOn = false
+			a.tunPID = 0
+		})
+		_ = a.shutdownHelper(3 * time.Second)
+		a.startGlobalTUN(a.tunID)
+	}()
 }
 
 // pidFileFresh reports whether the helper wrote its pid file recently. The
@@ -281,6 +335,7 @@ func (a *app) stopGlobalTUN() {
 		a.tunPID = 0
 		a.tunPending = false
 		a.tunWanted = false
+		a.tunPoints = ""
 		a.tunResumeTried = true
 		if stopped {
 			a.toast = "全局 TUN 已关闭，DNS 已恢复"

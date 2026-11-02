@@ -29,7 +29,7 @@ const version = "0.1.0"
 // app is everything the window shows and the manager that does the work.
 // appBuild is shown in the footer and the startup log so an old running
 // instance is easy to tell apart from a freshly built one.
-const appBuild = "0.23.0"
+const appBuild = "0.23.1"
 
 type app struct {
 	win   *mygo.Window
@@ -57,6 +57,10 @@ type app struct {
 	// resumed for this point once it logs in, so the switch reflects intent.
 	tunWanted      bool
 	tunResumeTried bool
+	// tunPoints is the online-point snapshot the helper was started with.
+	tunPoints string
+	// tunRefreshing guards the debounced rebuild goroutine.
+	tunRefreshing bool
 	// tunPending is true while a start/stop is in flight, so the switch keeps
 	// the position the user chose until the async result lands.
 	tunPending bool
@@ -330,6 +334,7 @@ func (a *app) invalidate() {
 		a.win.Invalidate()
 	}
 	a.maybeResumeTUN()
+	a.maybeRefreshTUN()
 }
 
 // maybeResumeTUN re-opens global TUN once, at startup, for the remembered
