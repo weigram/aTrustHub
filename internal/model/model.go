@@ -143,6 +143,9 @@ type Settings struct {
 	// access point it used, so the switch reflects the last state.
 	TunEnabled bool   `json:"tunEnabled"`
 	TunPointID string `json:"tunPointID"`
+	// HideDock keeps the app out of the Dock (macOS), with a menu bar icon
+	// instead, so closing the window leaves it running.
+	HideDock bool `json:"hideDock"`
 	// AutoLoginOptIn records that the user has been offered the auto-login
 	// default. Access points do not log in at startup unless they ask for it.
 	AutoLoginOptIn bool `json:"autoLoginOptIn"`

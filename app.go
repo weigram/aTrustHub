@@ -29,7 +29,7 @@ const version = "0.1.0"
 // app is everything the window shows and the manager that does the work.
 // appBuild is shown in the footer and the startup log so an old running
 // instance is easy to tell apart from a freshly built one.
-const appBuild = "0.21.4"
+const appBuild = "0.22.0"
 
 type app struct {
 	win   *mygo.Window
@@ -131,7 +131,9 @@ type settingsDraft struct {
 	aggregate     bool
 	autoReconnect bool
 	secretStore   string
-	err           string
+	// hideDock hides the macOS Dock icon; the menu bar icon takes over.
+	hideDock bool
+	err      string
 }
 
 func main() {
@@ -145,6 +147,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("aTrust Hub: %v", err)
 	}
+	// Clicking the Dock icon with the window hidden reopens it.
+	mygo.App.OnActivate(func(hasVisibleWindows bool) {
+		if !hasVisibleWindows {
+			a.showWindow()
+		}
+	})
 	mygo.App.OnSecondInstance(func([]string, string) {
 		if a.win != nil {
 			a.win.Show()
@@ -269,22 +277,23 @@ func (a *app) start() {
 	})
 	// Closing the window hides it instead of quitting, so the tunnels and the
 	// tray icon stay alive; 退出 in the tray menu really quits.
-	if a.tray != nil {
-		a.win.OnClose(func(e *mygo.CloseEvent) {
-			if a.quitRequested {
-				return
-			}
-			e.PreventDefault()
-			a.win.Hide()
-		})
-	}
+	// Closing the window hides it instead of quitting: tunnels, TUN and the
+	// tray/menu bar icon stay alive. Only 退出 really quits.
+	a.win.OnClose(func(e *mygo.CloseEvent) {
+		if a.quitRequested {
+			return
+		}
+		e.PreventDefault()
+		a.win.Hide()
+	})
+	a.applyDockPolicy()
+	a.setupTray()
 
 	// ZJU-Connect logs through the standard logger. Show its lines in the
 	// app's own log panel, with the time the bus adds, not two timestamps.
 	log.SetFlags(0)
 	a.bus.SetSink(a.logFile)
 	log.SetOutput(a.bus.Writer("zju"))
-	a.setupTray()
 	a.bus.SetNotify(a.invalidate)
 	go a.tailAccessLog()
 	a.mgr.Start()
