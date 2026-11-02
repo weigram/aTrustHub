@@ -566,11 +566,8 @@ func (a *app) header(c *ui.Context) {
 				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 					ui.Text(c, "全局 TUN").FontSize(13)
 					ui.Switch(c, &a.tunSwitch).Disabled(a.tunPending)
-					switch {
-					case a.tunPending:
+					if a.tunPending {
 						ui.Text(c, "处理中…").FontSize(12).TextColor(t.TextMuted)
-					case a.tunOn:
-						ui.Text(c, "已开启").FontSize(12).TextColor(t.TextMuted)
 					}
 				})
 				if a.tunSwitch != shown {
@@ -598,9 +595,6 @@ func (a *app) header(c *ui.Context) {
 				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 					ui.Text(c, "系统代理").FontSize(13)
 					ui.Switch(c, &a.sysProxySwitch)
-					if a.sysProxyOn {
-						ui.Text(c, "已开启").FontSize(12).TextColor(t.TextMuted)
-					}
 				})
 				if a.sysProxySwitch != a.sysProxyOn {
 					a.toggleSystemProxy()
