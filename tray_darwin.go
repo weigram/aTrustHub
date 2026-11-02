@@ -25,6 +25,10 @@ func (a *app) updateDockVisibility(hidden bool) {
 	}
 }
 
+// startupTray does nothing on macOS: the menu bar icon only appears once the
+// window is closed, and the Dock icon is shown while a window is open.
+func (a *app) startupTray() {}
+
 // setupTray adds the menu bar icon used while the Dock icon is hidden.
 func (a *app) setupTray() {
 	if a.tray != nil {

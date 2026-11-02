@@ -29,7 +29,7 @@ const version = "0.1.0"
 // app is everything the window shows and the manager that does the work.
 // appBuild is shown in the footer and the startup log so an old running
 // instance is easy to tell apart from a freshly built one.
-const appBuild = "0.22.1"
+const appBuild = "0.22.2"
 
 type app struct {
 	win   *mygo.Window
@@ -153,12 +153,7 @@ func main() {
 			a.showWindow()
 		}
 	})
-	mygo.App.OnSecondInstance(func([]string, string) {
-		if a.win != nil {
-			a.win.Show()
-			a.win.Focus()
-		}
-	})
+	mygo.App.OnSecondInstance(func([]string, string) { a.showWindow() })
 	mygo.App.WhenReady(a.start)
 	mygo.App.OnBeforeQuit(func(e *mygo.QuitEvent) { a.shutdown() })
 	if err := mygo.App.Run(); err != nil {
@@ -287,7 +282,9 @@ func (a *app) start() {
 		a.win.Hide()
 		a.updateDockVisibility(true)
 	})
-	a.setupTray()
+	// A window on screen means a Dock icon, whatever the closing behaviour is.
+	a.updateDockVisibility(false)
+	a.startupTray()
 
 	// ZJU-Connect logs through the standard logger. Show its lines in the
 	// app's own log panel, with the time the bus adds, not two timestamps.

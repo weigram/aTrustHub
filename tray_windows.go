@@ -36,5 +36,8 @@ func (a *app) setupTray() {
 // supportsDockToggle reports whether the Dock icon can be hidden here.
 func supportsDockToggle() bool { return false }
 
+// startupTray puts the app in the notification area from the start.
+func (a *app) startupTray() { a.setupTray() }
+
 // updateDockVisibility does nothing on Windows, which has no Dock.
 func (a *app) updateDockVisibility(hidden bool) {}
