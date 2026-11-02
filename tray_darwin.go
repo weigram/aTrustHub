@@ -9,24 +9,25 @@ import (
 // supportsDockToggle reports whether the Dock icon can be hidden here.
 func supportsDockToggle() bool { return true }
 
-// applyDockPolicy shows or hides the Dock icon to match the setting.
-func (a *app) applyDockPolicy() {
-	if a.cfg.Settings.HideDock {
+// updateDockVisibility shows the Dock icon while the window is up, and hides
+// it behind a menu bar icon once the window is closed, when the setting asks
+// for that.
+func (a *app) updateDockVisibility(hidden bool) {
+	if hidden && a.cfg.Settings.HideDock {
 		mygo.App.SetActivationPolicy(mygo.ActivationPolicyAccessory)
+		a.setupTray()
 		return
 	}
 	mygo.App.SetActivationPolicy(mygo.ActivationPolicyRegular)
-	// The menu bar icon is only a replacement for the Dock icon.
 	if a.tray != nil {
 		a.tray.Destroy()
 		a.tray = nil
 	}
 }
 
-// setupTray adds a menu bar icon when the app has no Dock icon, so it can
-// still be reopened or quit.
+// setupTray adds the menu bar icon used while the Dock icon is hidden.
 func (a *app) setupTray() {
-	if !a.cfg.Settings.HideDock {
+	if a.tray != nil {
 		return
 	}
 	icon := loadAppIconPNG()

@@ -7,11 +7,13 @@ import (
 	"github.com/egoist/mygo"
 )
 
-// showWindow brings the main window back from the tray or menu bar.
+// showWindow brings the main window back from the tray or menu bar, and puts
+// the Dock icon back on macOS.
 func (a *app) showWindow() {
 	if a.win == nil {
 		return
 	}
+	a.updateDockVisibility(false)
 	a.win.Show()
 	a.win.Focus()
 }

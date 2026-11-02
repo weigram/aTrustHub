@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"os/exec"
 	"sync"
+	"syscall"
 
 	"github.com/mythologyli/zju-connect/client"
 	"github.com/mythologyli/zju-connect/internal/hook_func"
@@ -16,6 +17,14 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 )
+
+// hiddenCmd runs a console program without flashing a window: these calls
+// come from a GUI helper, and several of them run per access point.
+func hiddenCmd(name string, args ...string) *exec.Cmd {
+	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	return cmd
+}
 
 const guid = "{4F5CDE94-D2A3-4AA5-A4A3-0FE6CB909E83}"
 const interfaceName = "ZJU Connect"
@@ -83,7 +92,7 @@ func (s *Stack) AddRoute(target string) error {
 		return fmt.Errorf("not a valid IPv4 address")
 	}
 
-	command := exec.Command("route", "add", ip.String(), "mask", net.IP(ipv4Net.Mask).String(), s.endpoint.ip.String(), "metric", "1")
+	command := hiddenCmd("route", "add", ip.String(), "mask", net.IP(ipv4Net.Mask).String(), s.endpoint.ip.String(), "metric", "1")
 	err = command.Run()
 	if err != nil {
 		return err
@@ -134,7 +143,7 @@ func NewStack(client client.Client, dnsHijack, fakeIP bool, ipResources []client
 	}
 
 	// Set MTU to 1400 otherwise error may occur when packets are large
-	command := exec.Command("netsh", "interface", "ipv4", "set", "subinterface", name, fmt.Sprintf("mtu=%d", MTU), "store=persistent")
+	command := hiddenCmd("netsh", "interface", "ipv4", "set", "subinterface", name, fmt.Sprintf("mtu=%d", MTU), "store=persistent")
 	err = command.Run()
 	if err != nil {
 		log.Printf("Run %s failed: %v", command.String(), err)
@@ -144,14 +153,14 @@ func NewStack(client client.Client, dnsHijack, fakeIP bool, ipResources []client
 	// mode each stack gets explicit routes instead, and a second default
 	// route would fight the first.
 	if ifaceName == "" {
-		command = exec.Command("route", "add", "0.0.0.0", "mask", "0.0.0.0", s.endpoint.ip.String(), "metric", "9999")
+		command = hiddenCmd("route", "add", "0.0.0.0", "mask", "0.0.0.0", s.endpoint.ip.String(), "metric", "9999")
 		err = command.Run()
 		if err != nil {
 			log.Printf("Run %s failed: %v", command.String(), err)
 		}
 	}
 
-	command = exec.Command("netsh", "interface", "ipv4", "delete", "dnsservers", name, "all")
+	command = hiddenCmd("netsh", "interface", "ipv4", "delete", "dnsservers", name, "all")
 	err = command.Run()
 	if err != nil {
 		log.Printf("Run %s failed: %v", command.String(), err)
@@ -161,7 +170,7 @@ func NewStack(client client.Client, dnsHijack, fakeIP bool, ipResources []client
 		if fakeIP {
 			dnsServerIP = "198.18.0.1"
 		}
-		command = exec.Command("netsh", "interface", "ipv4", "add", "dnsservers", name, dnsServerIP)
+		command = hiddenCmd("netsh", "interface", "ipv4", "add", "dnsservers", name, dnsServerIP)
 		err = command.Run()
 		if err != nil {
 			log.Printf("Run %s failed: %v", command.String(), err)
@@ -170,7 +179,7 @@ func NewStack(client client.Client, dnsHijack, fakeIP bool, ipResources []client
 
 	hook_func.RegisterTerminalFunc("Close Tun Device", func(ctx context.Context) error {
 		dev.Close()
-		closeCommand := exec.Command("netsh", "interface", "ipv4", "delete", "dnsservers", name, "all")
+		closeCommand := hiddenCmd("netsh", "interface", "ipv4", "delete", "dnsservers", name, "all")
 		return closeCommand.Run()
 	})
 	return s, nil

@@ -1183,7 +1183,7 @@ func (a *app) settingsView(c *ui.Context) {
 				ui.Checkbox(c, &d.aggregate, "开启统一入口 SOCKS5")
 				ui.Checkbox(c, &d.autoReconnect, "连接断开时自动重连")
 				if supportsDockToggle() {
-					ui.Checkbox(c, &d.hideDock, "隐藏 Dock 图标（改用菜单栏图标，关闭窗口仍继续运行）")
+					ui.Checkbox(c, &d.hideDock, "关闭后隐藏 Dock 图标")
 				}
 			})
 			ui.Text(c, "监听 127.0.0.1 只有本机能用；要让局域网里的设备用，"+
@@ -1587,10 +1587,7 @@ func (a *app) saveSettings() {
 	}
 	d.open = false
 	a.toast = "设置已保存"
-	a.applyDockPolicy()
-	if a.cfg.Settings.HideDock && a.tray == nil {
-		a.setupTray()
-	}
+
 }
 
 func (a *app) removePoint(id string) {

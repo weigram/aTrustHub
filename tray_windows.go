@@ -9,6 +9,9 @@ import (
 // setupTray adds the notification-area icon, so closing the window keeps the
 // app (and its tunnels) running.
 func (a *app) setupTray() {
+	if a.tray != nil {
+		return
+	}
 	icon := loadAppIconPNG()
 	if len(icon) == 0 {
 		return
@@ -33,5 +36,5 @@ func (a *app) setupTray() {
 // supportsDockToggle reports whether the Dock icon can be hidden here.
 func supportsDockToggle() bool { return false }
 
-// applyDockPolicy does nothing on Windows.
-func (a *app) applyDockPolicy() {}
+// updateDockVisibility does nothing on Windows, which has no Dock.
+func (a *app) updateDockVisibility(hidden bool) {}

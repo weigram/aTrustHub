@@ -29,7 +29,7 @@ const version = "0.1.0"
 // app is everything the window shows and the manager that does the work.
 // appBuild is shown in the footer and the startup log so an old running
 // instance is easy to tell apart from a freshly built one.
-const appBuild = "0.22.0"
+const appBuild = "0.22.1"
 
 type app struct {
 	win   *mygo.Window
@@ -285,8 +285,8 @@ func (a *app) start() {
 		}
 		e.PreventDefault()
 		a.win.Hide()
+		a.updateDockVisibility(true)
 	})
-	a.applyDockPolicy()
 	a.setupTray()
 
 	// ZJU-Connect logs through the standard logger. Show its lines in the
@@ -417,8 +417,23 @@ func (a *app) copyText(text string) {
 		a.invalidate()
 		return
 	}
-	a.toast = "已复制：" + text
+	// Keep the notice short: showing the copied text itself made the toast
+	// cover the window when a whole log was copied.
+	if lines := strings.Count(text, "\n") + 1; lines > 1 {
+		a.toast = fmt.Sprintf("已复制 %d 行", lines)
+	} else {
+		a.toast = "已复制：" + shortText(text, 40)
+	}
 	a.invalidate()
+}
+
+// shortText clips s for a one-line notice.
+func shortText(s string, max int) string {
+	s = strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
+	if len([]rune(s)) <= max {
+		return s
+	}
+	return string([]rune(s)[:max]) + "…"
 }
 
 func (a *app) describeProgress() string {
