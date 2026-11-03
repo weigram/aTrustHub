@@ -31,7 +31,19 @@ func (a *app) showWindow() {
 }
 
 // quitFromTray quits for real, instead of hiding the window.
-func (a *app) quitFromTray() {
+func (a *app) quitFromTray() { a.askQuit() }
+
+// askQuit opens the confirmation instead of closing the app at once.
+func (a *app) askQuit() {
+	if a.win != nil {
+		a.showWindow()
+	}
+	a.win.Update(func() { a.quitAsk = true })
+	a.invalidate()
+}
+
+// doQuit really ends the process.
+func (a *app) doQuit() {
 	a.quitRequested = true
 	mygo.App.Quit()
 }

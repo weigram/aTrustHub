@@ -64,6 +64,11 @@ type Client struct {
 	apps            []App
 	resourceData    []byte
 
+	// authHost and cookies are kept so a session can be probed later without
+	// logging in again.
+	authHost string
+	cookies  []auth.Cookie
+
 	MajorNodeGroup   string
 	NodeGroups       map[string]NodeGroup
 	BestNodes        map[string]string
@@ -245,6 +250,30 @@ func GetAuthInfoList(serverAddress string, serverPort int, bindInterface string,
 	return sess.GetAuthInfoList()
 }
 
+// OnlineStatus is the answer of a session validity probe.
+type OnlineStatus struct {
+	Username string
+	Code     int
+	Message  string
+}
+
+// CheckOnline asks the portal whether this session is still the active one.
+// When another client logs in with the same account the server takes the
+// session over, and the only way to notice is to ask.
+func (c *Client) CheckOnline() (OnlineStatus, error) {
+	if c.authHost == "" || len(c.cookies) == 0 {
+		return OnlineStatus{}, errors.New("没有可用于检测的会话")
+	}
+	sess := auth.NewSession(c.authHost, c.tlsKeyLogWriter, c.underlayDialer.DialContext)
+	sess.RestoreCookies(c.cookies)
+	username, code, message, err := sess.OnlineProbe()
+	status := OnlineStatus{Username: username, Code: code, Message: message}
+	if err != nil {
+		return status, err
+	}
+	return status, nil
+}
+
 func (c *Client) CanUseTCPTunnel() bool {
 	return true
 }
@@ -349,6 +378,7 @@ func (c *Client) Setup(options SetupOptions) ([]byte, error) {
 		authServerHost = fmt.Sprintf("%s:%d", options.ServerAddress, options.ServerPort)
 	}
 	sess := auth.NewSession(authServerHost, c.tlsKeyLogWriter, c.underlayDialer.DialContext)
+	c.authHost = authServerHost
 	serverVersionInfo, manifestErr := sess.ServerVersionInfo()
 	serverVersionInfo, err := resolveServerVersionInfo(clientAuthData.ServerVersionInfo, serverVersionInfo, manifestErr)
 	if err != nil {
@@ -405,6 +435,8 @@ func (c *Client) Setup(options SetupOptions) ([]byte, error) {
 		}
 
 	}
+	c.cookies = clientAuthData.Cookies
+
 	authData, err := json.Marshal(clientAuthData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal client data: %w", err)

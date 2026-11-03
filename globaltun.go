@@ -52,6 +52,8 @@ type tunPointConfig struct {
 	ClientData string `json:"clientData"`
 	Resource   string `json:"resource"`
 	FakeCIDR   string `json:"fakeCIDR"`
+	// DisabledApps are application IDs kept out of this tunnel.
+	DisabledApps []string `json:"disabledApps,omitempty"`
 }
 
 type tunConfigFile struct {
@@ -127,6 +129,7 @@ func (a *app) tunConfigFor() (tunConfigFile, error) {
 			Name: point.Name, Server: point.Server, Port: point.Port,
 			SID: cd.sid(), DeviceID: cd.DeviceID,
 			ClientData: clientPath, Resource: resourcePath, FakeCIDR: fake,
+			DisabledApps: point.DisabledApps,
 		})
 	}
 	if len(cfg.Points) == 0 {

@@ -143,6 +143,11 @@ func connectZJU(ctx context.Context, opts ZJUOptions, point model.AccessPoint, c
 
 	ipResources, _ := client.IPResources()
 	domainResources, _ := client.DomainResources()
+	if skipped := len(point.DisabledApps); skipped > 0 {
+		before := len(ipResources)
+		ipResources, domainResources = dropDisabledApps(point.DisabledApps, ipResources, domainResources)
+		zjuLog.Printf("已按设置停用 %d 个应用：%d 条 IP 资源 → %d 条", skipped, before, len(ipResources))
+	}
 	dnsResource, _ := client.DNSResource()
 	dnsServers, _ := client.DNSServers()
 
@@ -217,6 +222,36 @@ type zjuSession struct {
 }
 
 func (s *zjuSession) Info() SessionInfo { return s.info }
+
+// CheckAlive asks the portal whether this login is still the active one. The
+// tunnel stays up after another client takes the account over, so this is the
+// only way to notice.
+func (s *zjuSession) CheckAlive(ctx context.Context) (AliveStatus, error) {
+	if s.closed.Load() {
+		return AliveStatus{}, errors.New("接入点已断开")
+	}
+	type result struct {
+		status AliveStatus
+		err    error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		online, err := s.client.CheckOnline()
+		res := AliveStatus{
+			Username: online.Username,
+			Code:     online.Code,
+			Message:  online.Message,
+			Valid:    err == nil && online.Code == 0,
+		}
+		ch <- result{res, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.status, r.err
+	case <-ctx.Done():
+		return AliveStatus{}, ctx.Err()
+	}
+}
 
 func (s *zjuSession) Dial(ctx context.Context, network, addr string) (net.Conn, error) {
 	if s.closed.Load() {

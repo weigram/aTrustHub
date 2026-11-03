@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -21,9 +24,36 @@ import (
 // hiddenCmd runs a console program without flashing a window: these calls
 // come from a GUI helper, and several of them run per access point.
 func hiddenCmd(name string, args ...string) *exec.Cmd {
-	cmd := exec.Command(name, args...)
+	cmd := exec.Command(systemPath(name), args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	return cmd
+}
+
+// systemPath resolves a bare command to its file under the Windows system
+// directory, so a PATH without System32 cannot break routing setup.
+func systemPath(name string) string {
+	if strings.ContainsAny(name, `/\`) {
+		return name
+	}
+	root := os.Getenv("SystemRoot")
+	if root == "" {
+		root = `C:\Windows`
+	}
+	exe := name
+	if !strings.HasSuffix(strings.ToLower(exe), ".exe") {
+		exe += ".exe"
+	}
+	for _, dir := range []string{
+		filepath.Join(root, "System32"),
+		filepath.Join(root, "System32", "WindowsPowerShell", "v1.0"),
+		filepath.Join(root, "Sysnative"),
+	} {
+		path := filepath.Join(dir, exe)
+		if st, err := os.Stat(path); err == nil && !st.IsDir() {
+			return path
+		}
+	}
+	return name
 }
 
 const guid = "{4F5CDE94-D2A3-4AA5-A4A3-0FE6CB909E83}"

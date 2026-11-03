@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"time"
 
 	clientpkg "github.com/mythologyli/zju-connect/client"
 	"github.com/mythologyli/zju-connect/client/easyconnect"
@@ -22,6 +23,10 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 )
+
+// ProcessExitOnShutdown lets a standalone helper end the process on a server
+// SHUTDOWN; an embedder such as a GUI leaves it false and survives.
+var ProcessExitOnShutdown = false
 
 type Stack struct {
 	gvisorStack *stack.Stack
@@ -111,18 +116,28 @@ func (ep *Endpoint) WritePackets(list stack.PacketBufferList) (int, tcpip.Error)
 				// is strictly better than panicking with a gvisor stack
 				// trace, which obscures the actual cause.
 				if errors.Is(err, easyconnect.ErrSangforShutdown) {
-					log.Printf("WritePackets: server SHUTDOWN; running cleanup hooks and exiting for clean restart")
+					log.Printf("WritePackets: 服务器 SHUTDOWN，运行清理钩子")
 					if !hook_func.IsTerminal() {
 						hook_func.ExecTerminalFunc(context.Background())
 					}
-					os.Exit(2)
+					// The standalone helper exits so a wrapper can restart it
+					// cleanly. Inside the GUI that would close the whole app,
+					// so only the helper asks for an exit.
+					if ProcessExitOnShutdown {
+						os.Exit(2)
+					}
+					return list.Len(), nil
 				}
 
+				// A closed tunnel with gVisor still retransmitting is the
+				// normal shape of 断开. Drop the packet: panicking here would
+				// run on a gVisor timer goroutine, outside every recover, and
+				// take the whole application down.
 				if hook_func.IsTerminal() {
 					return list.Len(), nil
-				} else {
-					panic(err)
 				}
+				logWriteDrop(err)
+				continue
 			}
 			log.DebugPrintf("Send: wrote %d bytes", n)
 			log.DebugDumpHex(buf[:n])
@@ -130,6 +145,35 @@ func (ep *Endpoint) WritePackets(list stack.PacketBufferList) (int, tcpip.Error)
 	}
 
 	return list.Len(), nil
+}
+
+var (
+	dropMu     sync.Mutex
+	dropCount  int
+	dropLast   time.Time
+	dropReason string
+)
+
+// logWriteDrop reports dropped outbound packets at most once every five
+// seconds, together with how many were affected.
+func logWriteDrop(err error) {
+	dropMu.Lock()
+	defer dropMu.Unlock()
+	dropCount++
+	message := err.Error()
+	if message != dropReason {
+		dropReason = message
+		dropCount = 1
+		dropLast = time.Now()
+		log.Printf("WritePackets: 丢弃包（隧道不可写）：%v", err)
+		return
+	}
+	if time.Since(dropLast) < 5*time.Second {
+		return
+	}
+	log.Printf("WritePackets: 近 5 秒丢弃 %d 个包（隧道不可写）：%v", dropCount, err)
+	dropCount = 0
+	dropLast = time.Now()
 }
 
 func joinPacketSlices(slices [][]byte) []byte {

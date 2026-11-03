@@ -121,6 +121,70 @@ type AccessPoint struct {
 	InPool      bool  `json:"inPool"`
 	AutoConnect bool  `json:"autoConnect"`
 	CreatedAt   int64 `json:"createdAt,omitempty"`
+	// Monitor asks the portal now and then whether this access point's login
+	// is still the active one: another client signing in with the same account
+	// takes the session over, and the tunnel can look fine while it is dead.
+	// nil means the default, which is on.
+	Monitor *bool `json:"monitor,omitempty"`
+	// MonitorInterval is the check period in seconds; 0 means the default.
+	MonitorInterval int `json:"monitorInterval,omitempty"`
+	// DisabledApps holds application IDs the user took out of the tunnel,
+	// because their addresses clash with the local network or with another
+	// access point.
+	DisabledApps []string `json:"disabledApps,omitempty"`
+}
+
+// defaultMonitorInterval is how often the session is probed when unset.
+const defaultMonitorInterval = 300
+
+// MonitorEnabled reports whether session validity monitoring is on. Existing
+// configurations have no value stored, and those default to on.
+func (p *AccessPoint) MonitorEnabled() bool {
+	if p.Monitor == nil {
+		return true
+	}
+	return *p.Monitor
+}
+
+// MonitorIntervalSeconds is the probe period, with the default applied and a
+// floor so a typo cannot turn the app into a request flood.
+func (p *AccessPoint) MonitorIntervalSeconds() int {
+	if p.MonitorInterval <= 0 {
+		return defaultMonitorInterval
+	}
+	if p.MonitorInterval < 30 {
+		return 30
+	}
+	return p.MonitorInterval
+}
+func (p *AccessPoint) AppDisabled(id string) bool {
+	for _, s := range p.DisabledApps {
+		if s == id {
+			return true
+		}
+	}
+	return false
+}
+
+// SetAppDisabled records the choice and reports whether it changed anything.
+func (p *AccessPoint) SetAppDisabled(id string, disabled bool) bool {
+	if id == "" {
+		return false
+	}
+	if p.AppDisabled(id) == disabled {
+		return false
+	}
+	kept := make([]string, 0, len(p.DisabledApps)+1)
+	for _, s := range p.DisabledApps {
+		if s != id {
+			kept = append(kept, s)
+		}
+	}
+	if disabled {
+		kept = append(kept, id)
+	}
+	p.DisabledApps = kept
+	return true
 }
 
 // Settings are the app's own settings.

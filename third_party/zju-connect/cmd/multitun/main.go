@@ -32,6 +32,7 @@ import (
 	"github.com/mythologyli/zju-connect/internal/zcdns"
 	"github.com/mythologyli/zju-connect/resolve"
 	"github.com/mythologyli/zju-connect/service"
+	"github.com/mythologyli/zju-connect/stack/gvisor"
 	"github.com/mythologyli/zju-connect/stack/tun"
 	"github.com/mythologyli/zju-connect/underlay"
 )
@@ -45,6 +46,9 @@ type pointConfig struct {
 	ClientData string `json:"clientData"`
 	Resource   string `json:"resource"`
 	FakeCIDR   string `json:"fakeCIDR"`
+	// DisabledApps are application IDs the user took out of the tunnel: their
+	// ranges clash with the local network or with another access point.
+	DisabledApps []string `json:"disabledApps,omitempty"`
 }
 
 type tunConfig struct {
@@ -134,6 +138,9 @@ type point struct {
 }
 
 func main() {
+	// This is a standalone helper: a server SHUTDOWN must end the process so
+	// its cleanup (DNS, routes) runs and the GUI can start a fresh one.
+	gvisor.ProcessExitOnShutdown = true
 	cfgPath := flag.String("config", "", "JSON config with the access points")
 	accessLog := flag.String("access-log", "", "file to append access records to")
 	logFile := flag.String("log-file", "", "write the helper's log here")
@@ -334,6 +341,11 @@ func startPoint(pc pointConfig, accessLog string, index int) (*point, error) {
 
 	ipResources, _ := cli.IPResources()
 	domainResources, _ := cli.DomainResources()
+	if len(pc.DisabledApps) > 0 {
+		before := len(ipResources)
+		ipResources, domainResources = dropDisabledApps(pc.DisabledApps, ipResources, domainResources)
+		log.Printf("point %s: 停用 %d 个应用，IP 资源 %d → %d", pc.Name, len(pc.DisabledApps), before, len(ipResources))
+	}
 	dnsResource, _ := cli.DNSResource()
 	remoteDNS, err := cli.DNSServer()
 	useRemoteDNS := err == nil && net.ParseIP(remoteDNS) != nil

@@ -31,7 +31,7 @@ const version = "0.1.0"
 // app is everything the window shows and the manager that does the work.
 // appBuild is shown in the footer and the startup log so an old running
 // instance is easy to tell apart from a freshly built one.
-const appBuild = "0.24.2"
+const appBuild = "0.25.0"
 
 type app struct {
 	win   *mygo.Window
@@ -59,6 +59,10 @@ type app struct {
 	// resumed for this point once it logs in, so the switch reflects intent.
 	tunWanted      bool
 	tunResumeTried bool
+	// quitAsk shows the confirmation before the app really exits.
+	quitAsk bool
+	// update holds the newer release found at startup, if any.
+	update *updateInfo
 	// tunPoints is the online-point snapshot the helper was started with.
 	tunPoints string
 	// tunDiag rate-limits the rebuild diagnostics to state changes.
@@ -127,6 +131,8 @@ type editorDraft struct {
 	socksPort     string
 	inPool        bool
 	autoConnect   bool
+	monitor       bool
+	monitorEvery  string
 	secretStore   string
 	clearTOTP     bool
 	hasPassword   bool
@@ -171,7 +177,17 @@ func main() {
 	})
 	mygo.App.OnSecondInstance(func([]string, string) { a.showWindow() })
 	mygo.App.WhenReady(a.start)
-	mygo.App.OnBeforeQuit(func(e *mygo.QuitEvent) { a.shutdown() })
+	mygo.App.OnBeforeQuit(func(e *mygo.QuitEvent) {
+		// Cmd+Q and the Dock's 退出 land here too. Ask once, then let the
+		// confirmed quit through. If a dialog is already open the request came
+		// from the system (logout, shutdown), so do not block it.
+		if !a.quitRequested && !a.quitAsk {
+			e.PreventDefault()
+			a.askQuit()
+			return
+		}
+		a.shutdown()
+	})
 	if err := mygo.App.Run(); err != nil {
 		log.Fatal(err)
 	}
@@ -219,6 +235,12 @@ func newApp() (*app, error) {
 	if logPath == "" {
 		logPath = filepath.Join(dir, "app.log")
 	}
+	// Panics print to stderr, which goes nowhere when the app is started from
+	// Finder. Point the descriptor at a file so a crash is never a mystery.
+	if errF, err := os.OpenFile(filepath.Join(dir, "stderr.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+		redirectStderr(errF)
+	}
+
 	// Append, not truncate: restarting the app used to wipe the record of what
 	// went wrong right before the restart. Keep the file at a sane size.
 	if st, err := os.Stat(logPath); err == nil && st.Size() > 4<<20 {
@@ -287,6 +309,7 @@ func (a *app) start() {
 	// app's own log panel, with the time the bus adds, not two timestamps.
 	log.SetFlags(0)
 	a.bus.SetSink(a.logFile)
+	a.bus.Add("app", fmt.Sprintf("aTrust Hub %s 启动（窗口就绪），数据目录 %s", appBuild, a.dir))
 	log.SetOutput(a.bus.Writer("zju"))
 	a.bus.SetNotify(a.invalidate)
 	go a.tailAccessLog()
@@ -304,6 +327,10 @@ func (a *app) start() {
 			}
 		}
 	}()
+
+	// Ask GitHub for a newer release in the background, so a blocked mirror
+	// can never hold up the window.
+	go a.checkForUpdate()
 
 	// Make sure the first window is on screen even if the remembered state or
 	// an early activation left it hidden.

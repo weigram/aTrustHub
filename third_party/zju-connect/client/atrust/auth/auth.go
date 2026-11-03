@@ -323,6 +323,15 @@ func (s *Session) completeSMS(step authStep) (authStep, error) {
 	return s.smsCheckCode(step)
 }
 
+// RestoreCookies puts saved cookies into the session, so an authenticated
+// request can be made without logging in again.
+func (s *Session) RestoreCookies(cookies []Cookie) {
+	for _, cookie := range cookies {
+		c := &http.Cookie{Name: cookie.Name, Value: cookie.Value}
+		s.client.Jar.SetCookies(&url.URL{Host: cookie.Host, Scheme: cookie.Scheme}, []*http.Cookie{c})
+	}
+}
+
 func (s *Session) Login(method LoginMethod, opts LoginOptions) (LoginResult, error) {
 	if len(opts.Cookies) > 0 {
 		for _, cookie := range opts.Cookies {

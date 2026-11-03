@@ -97,8 +97,15 @@ type View struct {
 	InPool      bool
 	AutoConnect bool
 
-	State      State
-	Error      string
+	State  State
+	Error  string
+	// MonitorOn, MonitorInterval, Alive and AliveErr describe the session
+	// validity check of this point.
+	MonitorOn       bool
+	MonitorInterval int
+	Alive           string
+	AliveAt         int64
+	AliveErr        string
 	ClientIP   string
 	DNSServer  string
 	NodeGroups []string
@@ -144,6 +151,8 @@ type Manager struct {
 	rr atomic.Uint64
 
 	healthStop chan struct{}
+	// monitorStop ends the session validity loop.
+	monitorStop chan struct{}
 	healthWG   sync.WaitGroup
 
 	started bool
@@ -170,6 +179,11 @@ type endpoint struct {
 	login time.Duration
 	// probeFails counts consecutive health probes that failed.
 	probeFails int
+	// 会话有效性监测状态。
+	aliveAt    time.Time
+	aliveState string
+	aliveErr   string
+	aliveFails int
 }
 
 // NewManager returns a manager that uses connector to log in and creds to
@@ -182,10 +196,12 @@ func NewManager(connector Connector, creds CredentialFunc, bus *LogBus, notify f
 		creds:      creds,
 		bus:        bus,
 		notify:     notify,
-		healthStop: make(chan struct{}),
+		healthStop:  make(chan struct{}),
+		monitorStop: make(chan struct{}),
 	}
 	m.healthWG.Add(1)
 	go m.healthLoop()
+	go m.monitorLoop()
 	return m
 }
 
@@ -318,6 +334,7 @@ func (m *Manager) Close() {
 	m.mu.Unlock()
 
 	close(m.healthStop)
+	close(m.monitorStop)
 	healthDone := make(chan struct{})
 	go func() {
 		m.healthWG.Wait()
@@ -373,6 +390,14 @@ func (m *Manager) Views() []View {
 			Active:     ep.active.Load(), Total: ep.total.Load(),
 			Failed:  ep.failed.Load(),
 			Latency: time.Duration(ep.latencyNS.Load()),
+
+			MonitorOn:       ep.cfg.MonitorEnabled(),
+			MonitorInterval: ep.cfg.MonitorIntervalSeconds(),
+			Alive:           ep.aliveState,
+			AliveErr:        ep.aliveErr,
+		}
+		if !ep.aliveAt.IsZero() {
+			v.AliveAt = ep.aliveAt.Unix()
 		}
 		views = append(views, v)
 	}
@@ -512,6 +537,11 @@ func (m *Manager) connect(id string, gen int) {
 	cur.errMsg = ""
 	cur.info = sess.Info()
 	cur.probeFails = 0
+	// A fresh login starts the validity report from scratch.
+	cur.aliveFails = 0
+	cur.aliveAt = time.Time{}
+	cur.aliveState = ""
+	cur.aliveErr = ""
 	cur.login = time.Since(start)
 	m.mu.Unlock()
 
@@ -1005,6 +1035,149 @@ func hashHost(host string) uint32 {
 	return h
 }
 
+// monitorLoop asks the portal, per access point and on its own schedule,
+// whether the login is still the active one. Another client signing in with the
+// same account takes the session over, and the tunnel keeps looking healthy.
+func (m *Manager) monitorLoop() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.monitorStop:
+			return
+		case <-ticker.C:
+			m.checkSessions()
+		}
+	}
+}
+
+// checkSessions probes every online point whose interval has elapsed.
+func (m *Manager) checkSessions() {
+	type job struct {
+		id   string
+		name string
+		sess Session
+	}
+	var jobs []job
+	now := time.Now()
+	m.mu.RLock()
+	if !m.closed {
+		for _, id := range m.order {
+			ep := m.points[id]
+			if ep == nil || ep.state != StateOnline || ep.sess == nil {
+				continue
+			}
+			if !ep.cfg.MonitorEnabled() {
+				continue
+			}
+			if _, ok := ep.sess.(AliveProber); !ok {
+				continue
+			}
+			if !ep.aliveAt.IsZero() && now.Sub(ep.aliveAt) < time.Duration(ep.cfg.MonitorIntervalSeconds())*time.Second {
+				continue
+			}
+			jobs = append(jobs, job{id: id, name: ep.cfg.Name, sess: ep.sess})
+		}
+	}
+	m.mu.RUnlock()
+
+	for _, j := range jobs {
+		go m.checkSession(j.id, j.name, j.sess)
+	}
+}
+
+// checkSession runs one probe and acts on it. A network failure is only
+// recorded: two real "session is not yours anymore" answers are needed before
+// the point is taken down, so a flaky link cannot drop a working tunnel.
+func (m *Manager) checkSession(id, name string, sess Session) {
+	prober, ok := sess.(AliveProber)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	status, err := prober.CheckAlive(ctx)
+	cancel()
+
+	m.mu.Lock()
+	ep := m.points[id]
+	if ep == nil || ep.sess != sess || ep.state != StateOnline {
+		m.mu.Unlock()
+		return
+	}
+	ep.aliveAt = time.Now()
+	switch {
+	case err != nil:
+		ep.aliveState = "无法确认"
+		ep.aliveErr = err.Error()
+		m.mu.Unlock()
+		m.logf("[%s] 会话检测暂时无法完成：%v", name, err)
+		m.changed()
+	case status.Valid:
+		ep.aliveState = "有效"
+		ep.aliveErr = ""
+		ep.aliveFails = 0
+		m.mu.Unlock()
+		m.changed()
+	default:
+		ep.aliveFails++
+		ep.aliveState = "已失效"
+		reason := fmt.Sprintf("服务器判定会话已不可用（code=%d %s）", status.Code, status.Message)
+		ep.aliveErr = reason
+		final := ep.aliveFails >= 2
+		m.mu.Unlock()
+		m.logf("[%s] %s（第 %d 次）", name, reason, ep.aliveFails)
+		if final {
+			m.markInvalid(id, "会话已被其它客户端顶掉："+reason)
+		} else {
+			m.changed()
+		}
+	}
+}
+
+// CheckNow runs one validity probe for a point right away, ignoring its
+// schedule, so the user can test the setting.
+func (m *Manager) CheckNow(id string) bool {
+	m.mu.RLock()
+	ep := m.points[id]
+	if ep == nil || ep.state != StateOnline || ep.sess == nil {
+		m.mu.RUnlock()
+		return false
+	}
+	sess, name := ep.sess, ep.cfg.Name
+	m.mu.RUnlock()
+	go m.checkSession(id, name, sess)
+	return true
+}
+
+// markInvalid tears a session down and keeps the reason visible, instead of
+// letting the point look merely offline.
+func (m *Manager) markInvalid(id, msg string) {
+	var closes []closeLater
+	m.mu.Lock()
+	ep := m.points[id]
+	if ep == nil {
+		m.mu.Unlock()
+		return
+	}
+	name := ep.cfg.Name
+	m.stopEndpointLocked(id, &closes)
+	ep.state = StateError
+	ep.errMsg = msg
+	ep.aliveState = "已失效"
+	m.mu.Unlock()
+
+	for _, c := range closes {
+		if c.proxy != nil {
+			_ = c.proxy.Close()
+		}
+		if c.sess != nil {
+			_ = c.sess.Close()
+		}
+	}
+	m.logf("[%s] %s", name, msg)
+	m.changed()
+}
+
 func (m *Manager) healthLoop() {
 	defer m.healthWG.Done()
 	ticker := time.NewTicker(15 * time.Second)
@@ -1087,6 +1260,21 @@ func (m *Manager) probeAll(autoReconnect bool) {
 		}()
 	}
 	wg.Wait()
+}
+
+// AliveStatus is what a session reports about its login still being valid on
+// the server side.
+type AliveStatus struct {
+	Valid    bool
+	Username string
+	Code     int
+	Message  string
+}
+
+// AliveProber is a Session that can ask the portal whether its login is still
+// the active one, which a tunnel probe cannot tell.
+type AliveProber interface {
+	CheckAlive(ctx context.Context) (AliveStatus, error)
 }
 
 // Prober is a Session that can check its own tunnel.

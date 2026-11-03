@@ -4,7 +4,6 @@ package main
 
 import (
 	"fmt"
-	"os/exec"
 	"strings"
 )
 
@@ -21,11 +20,11 @@ func applySystemProxy(hostPort string, on bool) error {
 	}
 	if on {
 		// WinINET takes a SOCKS entry as "socks=host:port".
-		if out, err := exec.Command("reg", "add", proxyKey, "/v", "ProxyServer",
+		if out, err := newCmd("reg", "add", proxyKey, "/v", "ProxyServer",
 			"/t", "REG_SZ", "/d", "socks="+hostPort, "/f").CombinedOutput(); err != nil {
 			return fmt.Errorf("写代理地址失败：%v：%s", err, strings.TrimSpace(string(out)))
 		}
-		if out, err := exec.Command("reg", "add", proxyKey, "/v", "ProxyOverride",
+		if out, err := newCmd("reg", "add", proxyKey, "/v", "ProxyOverride",
 			"/t", "REG_SZ", "/d", "<local>", "/f").CombinedOutput(); err != nil {
 			return fmt.Errorf("写代理例外失败：%v：%s", err, strings.TrimSpace(string(out)))
 		}
@@ -34,7 +33,7 @@ func applySystemProxy(hostPort string, on bool) error {
 	if on {
 		value = "1"
 	}
-	if out, err := exec.Command("reg", "add", proxyKey, "/v", "ProxyEnable",
+	if out, err := newCmd("reg", "add", proxyKey, "/v", "ProxyEnable",
 		"/t", "REG_DWORD", "/d", value, "/f").CombinedOutput(); err != nil {
 		return fmt.Errorf("切换代理开关失败：%v：%s", err, strings.TrimSpace(string(out)))
 	}
@@ -44,7 +43,7 @@ func applySystemProxy(hostPort string, on bool) error {
 
 // systemProxyEnabled reports whether WinINET currently has a proxy enabled.
 func systemProxyEnabled() bool {
-	out, err := exec.Command("reg", "query", proxyKey, "/v", "ProxyEnable").Output()
+	out, err := newCmd("reg", "query", proxyKey, "/v", "ProxyEnable").Output()
 	if err != nil {
 		return false
 	}
@@ -59,5 +58,5 @@ $t = Add-Type -MemberDefinition $sig -Name WinINet -Namespace Native -PassThru
 [void]$t::InternetSetOption([IntPtr]::Zero, 39, [IntPtr]::Zero, 0)
 [void]$t::InternetSetOption([IntPtr]::Zero, 37, [IntPtr]::Zero, 0)
 `
-	_ = exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script).Run()
+	_ = newCmd("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script).Run()
 }

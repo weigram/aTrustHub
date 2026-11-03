@@ -20,6 +20,9 @@ import (
 )
 
 // logIcon is a small document-with-lines glyph for the TUN log button.
+// githubIcon is the repository mark shown in the footer.
+var githubIcon = ui.MustParseSVG([]byte(`<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.3-1.7-1.3-1.7-1.1.7 0 0 0 0 1.2-.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17.3 4.7 18.3 5 18.3 5c.6 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .3"/></svg>`))
+
 var logIcon = ui.MustParseSVG([]byte(`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/><path d="M8 13h8"/><path d="M8 17h8"/></svg>`))
 
 // view builds one frame of the window: the header, the aggregate proxy,
@@ -53,6 +56,7 @@ func (a *app) view(c *ui.Context) {
 	a.editorView(c)
 	a.settingsView(c)
 	a.deleteView(c)
+	a.quitView(c)
 	a.appDetailView(c)
 }
 
@@ -226,9 +230,24 @@ func (a *app) appCard(c *ui.Context, entry appEntry) {
 				}
 				ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
 					ui.Text(c, app.TypeLabel()).FontSize(10).TextColor(t.Accent)
+					if !a.appEnabled(entry.PointID, app.ID) {
+						ui.Text(c, "已停用代理").FontSize(10).TextColor(t.Danger)
+					}
 					ui.Text(c, app.AddressSummary()).Font("monospace").
 						FontSize(10).TextColor(t.Text).Grow(1).Ellipsis("…")
 				})
+			})
+			// One switch per application: turning it off keeps that app's
+			// addresses out of the tunnel, which is the only way to settle an
+			// IP range clash with the local network or another point.
+			ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+				ui.Text(c, "隧道代理").FontSize(11).TextColor(t.TextMuted)
+				on := a.appEnabled(entry.PointID, app.ID)
+				state := on
+				ui.Switch(c, &state).Label("隧道代理 " + app.Name)
+				if state != on {
+					a.setAppEnabled(entry.PointID, app.ID, state)
+				}
 			})
 			if ui.Button(c, "复制").Label("复制应用 " + app.Name).Clicked() {
 				a.copyText(strings.Join(app.AddressLines(), "\n"))
@@ -741,6 +760,41 @@ func (a *app) pointCard(c *ui.Context, v vpn.View) {
 			}
 		})
 
+		// Session validity: only meaningful while online, and only shown when
+		// the point has the monitor switched on.
+		if v.State == vpn.StateOnline && v.MonitorOn {
+			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+				colour := t.TextMuted
+				switch v.Alive {
+				case "有效":
+					colour = t.Success
+				case "已失效":
+					colour = t.Danger
+				case "无法确认":
+					colour = t.Warning
+				}
+				state := v.Alive
+				if state == "" {
+					state = "待检测"
+				}
+				line := "会话监测：" + state + " · 每 " + strconv.Itoa(v.MonitorInterval) + " 秒"
+				if v.AliveAt > 0 {
+					line += " · 上次 " + time.Unix(v.AliveAt, 0).Format("15:04:05")
+				}
+				ui.Text(c, line).FontSize(11).TextColor(colour)
+				if v.AliveErr != "" && v.Alive != "有效" {
+					ui.Text(c, v.AliveErr).FontSize(11).TextColor(t.TextMuted).
+						Ellipsis("…")
+				}
+				if ui.Button(c, "立即检测").FontSize(11).Clicked() {
+					if !a.mgr.CheckNow(v.ID) {
+						a.toast = "只有在线的接入点可以检测"
+					} else {
+						a.toast = "已发起会话有效性检测"
+					}
+				}
+			})
+		}
 		if v.State == vpn.StateError && v.Error != "" {
 			ui.Text(c, v.Error).FontSize(12).TextColor(t.Danger)
 		}
@@ -887,8 +941,24 @@ func (a *app) accessSection(c *ui.Context) {
 func (a *app) footer(c *ui.Context) {
 	t := c.Theme()
 	ui.Row(c).AlignItems(ui.Center).Gap(10).Children(func() {
+		if ui.Button(c, "退出").FontSize(11).Background(t.Danger).
+			TextColor(ui.Hex("#ffffff")).Clicked() {
+			a.askQuit()
+		}
 		ui.Row(c).Grow(1)
-		ui.Text(c, "构建 "+appBuild).FontSize(10).TextColor(t.TextMuted)
+		ui.Text(c, "当前版本 "+appBuild).FontSize(10).TextColor(t.TextMuted)
+		if a.update != nil {
+			ui.Row(c).Padding(3, 8).Radius(8).AlignItems(ui.Center).Gap(5).
+				Tooltip("下载 v"+a.update.Version).
+				OnClick(func() { a.openUpdate() }).Children(func() {
+				ui.Text(c, "新版本 v"+a.update.Version).FontSize(11)
+			})
+		}
+		ui.Row(c).Padding(4).Radius(8).AlignItems(ui.Center).
+			Tooltip("项目主页："+projectURL).
+			OnClick(func() { a.openProject() }).Children(func() {
+			ui.Icon(c, githubIcon).Size(15, 15)
+		})
 		if ui.Button(c, logLabel(a.logsOpen)).FontSize(11).Clicked() {
 			a.logsOpen = !a.logsOpen
 		}
@@ -1126,6 +1196,17 @@ func (a *app) editorView(c *ui.Context) {
 					ui.Checkbox(c, &d.autoConnect, "应用启动时自动登录")
 				})
 			})
+			ui.Row(c).Gap(14).AlignItems(ui.Center).Children(func() {
+				ui.Checkbox(c, &d.monitor, "监测会话是否仍有效")
+				if d.monitor {
+					// Label and box on one line: the stacked field wrapped the
+					// caption onto two lines and looked out of place here.
+					ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+						ui.Text(c, "监测间隔（秒）").FontSize(12)
+						ui.TextInput(c, &d.monitorEvery).Width(90)
+					})
+				}
+			})
 			if d.err != "" {
 				ui.Text(c, d.err).FontSize(12).TextColor(t.Danger)
 			}
@@ -1133,6 +1214,7 @@ func (a *app) editorView(c *ui.Context) {
 			ui.Row(c).Gap(8).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
 				if d.editingID != "" {
 					if ui.Button(c, "删除此接入点").Background(t.Danger).
+						TextColor(ui.Hex("#ffffff")).
 						TextColor(ui.RGBA(255, 255, 255, 1)).Label("删除接入点 " + d.name).Clicked() {
 						a.deleting = d.editingID
 						d.open = false
@@ -1246,6 +1328,45 @@ func (a *app) deleteView(c *ui.Context) {
 	}
 }
 
+// quitView asks before closing the app: quitting drops every tunnel and, with
+// the global TUN on, restores the system DNS.
+func (a *app) quitView(c *ui.Context) {
+	if !a.quitAsk {
+		return
+	}
+	t := c.Theme()
+	open := a.quitAsk
+	ui.Modal(c, &open, func() {
+		ui.Column(c).Width(420).Gap(10).Children(func() {
+			ui.Text(c, "退出 aTrust Hub").FontSize(17).Bold()
+			online, _, _ := a.mgr.Counts()
+			line := "退出会断开所有隧道。"
+			if a.tunOn {
+				line += "全局 TUN 会关闭，系统 DNS 与代理恢复原状。"
+			}
+			if online > 0 {
+				line += fmt.Sprintf("当前有 %d 个接入点在线。", online)
+			}
+			ui.Text(c, line).FontSize(12).TextColor(t.Text)
+			ui.Text(c, "窗口上的关闭按钮只是隐藏到后台，不会退出。").
+				FontSize(11).TextColor(t.TextMuted)
+			ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
+				if ui.Button(c, "取消").Clicked() {
+					a.quitAsk = false
+				}
+				if ui.Button(c, "确认退出").Background(t.Danger).
+					TextColor(ui.Hex("#ffffff")).Clicked() {
+					a.quitAsk = false
+					a.doQuit()
+				}
+			})
+		})
+	})
+	if !open {
+		a.quitAsk = false
+	}
+}
+
 // ---- actions ----
 
 func (a *app) openNewEditor() {
@@ -1257,6 +1378,8 @@ func (a *app) openNewEditor() {
 		socksPort:     strconv.Itoa(a.cfg.NextSocksPort()),
 		inPool:        true,
 		autoConnect:   false,
+		monitor:       true,
+		monitorEvery:  "300",
 		secretStore:   secretStoreLabel(a.cfg.Settings.SecretStore),
 	}
 }
@@ -1278,6 +1401,8 @@ func (a *app) openEditor(v vpn.View) {
 		socksPort:     strconv.Itoa(p.SocksPort),
 		inPool:        p.InPool,
 		autoConnect:   p.AutoConnect,
+		monitor:       p.MonitorEnabled(),
+		monitorEvery:  strconv.Itoa(p.MonitorIntervalSeconds()),
 		secretStore:   secretStoreLabel(a.cfg.Settings.SecretStore),
 		hasPassword:   a.hasPassword(p.ID),
 		detected:      nil,
@@ -1338,6 +1463,13 @@ func (a *app) saveEditor() {
 		SocksPort:   socksPort,
 		InPool:      d.inPool,
 		AutoConnect: d.autoConnect,
+	}
+	monitor := d.monitor
+	p.Monitor = &monitor
+	if every, err := strconv.Atoi(strings.TrimSpace(d.monitorEvery)); err == nil && every > 0 {
+		p.MonitorInterval = every
+	} else {
+		p.MonitorInterval = 300
 	}
 	p.Normalize()
 	if p.ID == "" {

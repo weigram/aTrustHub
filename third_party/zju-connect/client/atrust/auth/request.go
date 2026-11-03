@@ -640,6 +640,38 @@ func (s *Session) onlineInfo() (string, error) {
 	return re.Data.Username, nil
 }
 
+// OnlineProbe asks the portal who is online with this session. Unlike the
+// login-time call it hands the server code back, so a caller can tell
+// "session taken over" apart from "network trouble".
+func (s *Session) OnlineProbe() (username string, code int, message string, err error) {
+	u := s.baseURL + "/passport/v1/user/onlineInfo"
+	req, _ := http.NewRequest("GET", u+"?"+WithSharedParams(nil).Encode(), nil)
+	req.Header.Set("User-Agent", UserAgent)
+	req.Header.Set("x-csrf-token", s.csrfToken)
+	req.Header.Set("x-sdp-traceid", s.randSdpId())
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return "", 0, "", err
+	}
+	defer func(Body io.ReadCloser) {
+		_ = Body.Close()
+	}(resp.Body)
+	body, _ := io.ReadAll(resp.Body)
+
+	var re struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Data    struct {
+			Username string `json:"username"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &re); err != nil {
+		return "", resp.StatusCode, "", fmt.Errorf("onlineInfo 响应无法解析：%w", err)
+	}
+	return re.Data.Username, re.Code, re.Message, nil
+}
+
 func (s *Session) ClientResource() ([]byte, error) {
 	log.Println("Perform POST /controller/v1/user/clientResource")
 
