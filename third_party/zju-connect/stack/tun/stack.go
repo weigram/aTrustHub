@@ -171,10 +171,12 @@ func (s *Stack) processIPV4(packet zctcpip.IPv4Packet) error {
 
 		if _, matched := client.MatchDomainResource(resources, protocol, port); matched {
 			if protocol == "tcp" {
-				_, tcpTunnelMatched := client.MatchDomainResourceWhere(resources, protocol, port, func(resource client.DomainResource) bool {
-					return !resource.EnableTCPPrefL3
-				})
-				err := s.processIPV4TCP(packet, packet.Payload(), tcpTunnelMatched)
+				// The destination is a fake address, which only exists so the
+				// connection can be tied to its domain. The TCP tunnel is the
+				// only path that tells the server that domain, so it is used
+				// even when the resource asks for L3: an L3 packet carries the
+				// fake address and the server rejects it.
+				err := s.processIPV4TCP(packet, packet.Payload(), true)
 				s.logAccess(domain, port, err)
 				return err
 			} else {

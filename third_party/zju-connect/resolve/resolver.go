@@ -17,6 +17,11 @@ import (
 )
 
 type Resolver struct {
+	// PreferFakeIP gives every internal domain its own fake address instead of
+	// the real one the server answered with. The TUN stack needs that to tell
+	// apart domains that share an IP.
+	PreferFakeIP bool
+
 	remoteUDPResolver *net.Resolver
 	remoteTCPResolver *net.Resolver
 	secondaryResolver *net.Resolver
@@ -106,6 +111,18 @@ func (r *Resolver) Resolve(ctx context.Context, host string) (resCtx context.Con
 	}
 
 	if r.dnsResource != nil {
+		// With PreferFakeIP every internal domain gets its own fake address.
+		// Some servers answer several domains with one IP, and the stack's
+		// IP-to-domain table can then only remember the last one, which sends
+		// the other domains' traffic out under the wrong application and the
+		// gateway silently drops it.
+		if r.PreferFakeIP && domainResourceFound {
+			if fakeIPValue := ctx.Value(ContextKeyFakeIP); fakeIPValue != nil {
+				ip := r.IPPool.GenerateIP(host, domainResources)
+				log.Printf("%s -> %s (Fake IP)", host, ip.String())
+				return ctx, ip, nil
+			}
+		}
 		if ips, found := r.dnsResource[host]; found && len(ips) > 0 {
 			cursorValue, _ := r.dnsResourceCursor.LoadOrStore(host, &atomic.Uint64{})
 			cursor := cursorValue.(*atomic.Uint64)

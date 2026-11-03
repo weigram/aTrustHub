@@ -223,6 +223,15 @@ type zjuSession struct {
 
 func (s *zjuSession) Info() SessionInfo { return s.info }
 
+// ClientData returns the session cookies for the TUN helper, which resumes
+// this login instead of making a second one.
+func (s *zjuSession) ClientData() ([]byte, error) {
+	if s.closed.Load() {
+		return nil, errors.New("接入点已断开")
+	}
+	return s.client.ClientData()
+}
+
 // CheckAlive asks the portal whether this login is still the active one. The
 // tunnel stays up after another client takes the account over, so this is the
 // only way to notice.

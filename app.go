@@ -31,7 +31,7 @@ const version = "0.1.0"
 // app is everything the window shows and the manager that does the work.
 // appBuild is shown in the footer and the startup log so an old running
 // instance is easy to tell apart from a freshly built one.
-const appBuild = "0.25.0"
+const appBuild = "0.26.0"
 
 type app struct {
 	win   *mygo.Window

@@ -23,6 +23,22 @@ import (
 // githubIcon is the repository mark shown in the footer.
 var githubIcon = ui.MustParseSVG([]byte(`<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.3-1.7-1.3-1.7-1.1.7 0 0 0 0 1.2-.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17.3 4.7 18.3 5 18.3 5c.6 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .3"/></svg>`))
 
+// copyIcon is two overlapping sheets, for "copy this address".
+var copyIcon = ui.MustParseSVG([]byte(`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>`))
+
+// refreshIcon is the two-arrow refresh glyph used by aTrust's own console, for
+// "check this session again".
+var refreshIcon = ui.MustParseSVG([]byte(`<svg viewBox="0 0 1024 1024" fill="currentColor"><path d="M168 504.2c1-43.7 10-86.1 26.9-126 17.3-41 42.1-77.7 73.7-109.4S337 212.3 378 195c42.4-17.9 87.4-27 133.9-27s91.5 9.1 133.8 27c40.9 17.3 77.7 42.1 109.3 73.8 9.9 9.9 19.2 20.4 27.8 31.4l-60.2 47c-5.3 4.1-3.5 12.5 3 14.1l175.7 43c5 1.2 9.9-2.6 9.9-7.7l0.8-180.9c0-6.7-7.7-10.5-12.9-6.3l-56.4 44.1C765.8 155.1 646.2 92 511.8 92 282.7 92 96.3 275.6 92 503.8c-0.1 4.5 3.5 8.2 8 8.2h60c4.4 0 7.9-3.5 8-7.8z m756 7.8h-60c-4.4 0-7.9 3.5-8 7.8-1 43.7-10 86.1-26.9 126-17.3 41-42.1 77.8-73.7 109.4S687 811.7 646 829c-42.4 17.9-87.4 27-133.9 27s-91.5-9.1-133.9-27c-40.9-17.3-77.7-42.1-109.3-73.8-9.9-9.9-19.2-20.4-27.8-31.4l60.2-47c5.3-4.1 3.5-12.5-3-14.1l-175.7-43c-5-1.2-9.9 2.6-9.9 7.7l-0.7 181c0 6.7 7.7 10.5 12.9 6.3l56.4-44.1C258.2 868.9 377.8 932 512.2 932c229.2 0 415.5-183.7 419.8-411.8 0.1-4.5-3.5-8.2-8-8.2z"/></svg>`))
+
+// iconButton draws a small clickable glyph, the same shape as the TUN log
+// button, so one-row actions do not take a full button's width.
+func iconButton(c *ui.Context, icon *ui.SVG, tooltip string, onClick func()) {
+	ui.Row(c).Padding(4).Radius(8).AlignItems(ui.Center).
+		OnClick(onClick).Tooltip(tooltip).Children(func() {
+		ui.Icon(c, icon).Size(15, 15)
+	})
+}
+
 var logIcon = ui.MustParseSVG([]byte(`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/><path d="M8 13h8"/><path d="M8 17h8"/></svg>`))
 
 // view builds one frame of the window: the header, the aggregate proxy,
@@ -249,9 +265,6 @@ func (a *app) appCard(c *ui.Context, entry appEntry) {
 					a.setAppEnabled(entry.PointID, app.ID, state)
 				}
 			})
-			if ui.Button(c, "复制").Label("复制应用 " + app.Name).Clicked() {
-				a.copyText(strings.Join(app.AddressLines(), "\n"))
-			}
 			if ui.Button(c, "详情").Label("应用详情 " + app.Name).Clicked() {
 				a.openAppDetail(entry)
 			}
@@ -646,11 +659,15 @@ func (a *app) aggregateCard(c *ui.Context) {
 			}
 			ui.Row(c).Size(8, 8).Radius(4).Background(dot)
 			if agg.Running {
-				ui.Text(c, "socks5://"+displayAddr(agg.Addr)).Font("monospace").
-					FontSize(13).TextColor(t.Text)
-				if ui.Button(c, "复制").Clicked() {
-					a.copyText("socks5://" + displayAddr(agg.Addr))
-				}
+				addr := "socks5://" + displayAddr(agg.Addr)
+				ui.Row(c).Gap(5).AlignItems(ui.Center).Children(func() {
+					ui.Text(c, addr).Font("monospace").FontSize(13).TextColor(t.Text)
+					ui.Row(c).Padding(3).Radius(6).AlignItems(ui.Center).
+						OnClick(func() { a.copyText(addr) }).
+						Tooltip("复制统一入口地址").Children(func() {
+						ui.Icon(c, copyIcon).Size(13, 13)
+					})
+				})
 			} else if agg.Error != "" {
 				ui.Text(c, "未监听："+agg.Error).FontSize(12).TextColor(t.Danger)
 			} else {
@@ -738,10 +755,9 @@ func (a *app) pointCard(c *ui.Context, v vpn.View) {
 			}
 			if v.SocksPort > 0 {
 				addr := "127.0.0.1:" + strconv.Itoa(v.SocksPort)
-				meta(c, t, "独立 SOCKS5", addr)
-				if ui.Button(c, "复制").FontSize(11).Clicked() {
-					a.copyText("socks5://" + addr)
-				}
+				socks := "socks5://" + addr
+				metaCopy(c, t, "独立 SOCKS5", addr, "复制独立 SOCKS5 地址",
+					func() { a.copyText(socks) })
 			}
 			meta(c, t, "连接", fmt.Sprintf("%d 当前 / %d 累计", v.Active, v.Total))
 			if len(v.Apps) > 0 {
@@ -760,49 +776,57 @@ func (a *app) pointCard(c *ui.Context, v vpn.View) {
 			}
 		})
 
-		// Session validity: only meaningful while online, and only shown when
-		// the point has the monitor switched on.
-		if v.State == vpn.StateOnline && v.MonitorOn {
-			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-				colour := t.TextMuted
-				switch v.Alive {
-				case "有效":
-					colour = t.Success
-				case "已失效":
-					colour = t.Danger
-				case "无法确认":
-					colour = t.Warning
-				}
-				state := v.Alive
-				if state == "" {
-					state = "待检测"
-				}
-				line := "会话监测：" + state + " · 每 " + strconv.Itoa(v.MonitorInterval) + " 秒"
-				if v.AliveAt > 0 {
-					line += " · 上次 " + time.Unix(v.AliveAt, 0).Format("15:04:05")
-				}
-				ui.Text(c, line).FontSize(11).TextColor(colour)
-				if v.AliveErr != "" && v.Alive != "有效" {
-					ui.Text(c, v.AliveErr).FontSize(11).TextColor(t.TextMuted).
-						Ellipsis("…")
-				}
-				if ui.Button(c, "立即检测").FontSize(11).Clicked() {
-					if !a.mgr.CheckNow(v.ID) {
-						a.toast = "只有在线的接入点可以检测"
-					} else {
-						a.toast = "已发起会话有效性检测"
-					}
-				}
-			})
-		}
 		if v.State == vpn.StateError && v.Error != "" {
 			ui.Text(c, v.Error).FontSize(12).TextColor(t.Danger)
 		}
 		summary := vpn.NodeSummary(v)
-		if len(summary) > 0 && v.State == vpn.StateOnline {
-			ui.Text(c, "节点组 "+strings.Join(summary, " · ")).
-				FontSize(11).TextColor(t.TextMuted)
+		showMonitor := v.State == vpn.StateOnline && v.MonitorOn
+		// The node summary and the session monitor share one row: the summary
+		// on the left, the monitor state and its refresh button on the right.
+		if (len(summary) > 0 && v.State == vpn.StateOnline) || showMonitor {
+			ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+				if len(summary) > 0 && v.State == vpn.StateOnline {
+					ui.Text(c, "节点组 "+strings.Join(summary, " · ")).
+						FontSize(11).TextColor(t.TextMuted).Grow(1).Ellipsis("…")
+				} else {
+					ui.Row(c).Grow(1)
+				}
+				if showMonitor {
+					a.sessionMonitor(c, v)
+				}
+			})
 		}
+	})
+}
+
+// sessionMonitor draws the validity state and the manual check button.
+func (a *app) sessionMonitor(c *ui.Context, v vpn.View) {
+	t := c.Theme()
+	colour := t.TextMuted
+	switch v.Alive {
+	case "有效":
+		colour = t.Success
+	case "已失效":
+		colour = t.Danger
+	case "无法确认":
+		colour = t.Warning
+	}
+	state := v.Alive
+	if state == "" {
+		state = "待检测"
+	}
+	ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+		ui.Text(c, "会话监测："+state).FontSize(11).TextColor(colour)
+		if v.AliveErr != "" && v.Alive != "有效" {
+			ui.Text(c, v.AliveErr).FontSize(11).TextColor(t.TextMuted).Ellipsis("…")
+		}
+		iconButton(c, refreshIcon, "立即检测会话是否仍有效", func() {
+			if !a.mgr.CheckNow(v.ID) {
+				a.toast = "只有在线的接入点可以检测"
+			} else {
+				a.toast = "已发起会话有效性检测"
+			}
+		})
 	})
 }
 
@@ -975,6 +999,19 @@ func logLabel(open bool) string {
 		return "收起日志"
 	}
 	return "运行日志"
+}
+
+// metaCopy draws "key value" with the copy glyph right next to the value: a
+// loose row gap left the icon floating far from what it copies.
+func metaCopy(c *ui.Context, t *ui.Theme, key, value, tooltip string, onClick func()) {
+	ui.Row(c).Gap(5).AlignItems(ui.Center).Children(func() {
+		ui.Text(c, key).FontSize(11).TextColor(t.TextMuted)
+		ui.Text(c, value).FontSize(11).Font("monospace").TextColor(t.Text)
+		ui.Row(c).Padding(3).Radius(6).AlignItems(ui.Center).
+			OnClick(onClick).Tooltip(tooltip).Children(func() {
+			ui.Icon(c, copyIcon).Size(13, 13)
+		})
+	})
 }
 
 func meta(c *ui.Context, t *ui.Theme, key, value string) {
@@ -1187,11 +1224,14 @@ func (a *app) editorView(c *ui.Context) {
 				ui.Select(c, &d.secretStore, secretStoreLabels()).Width(220)
 			})
 			ui.Divider(c)
-			ui.Row(c).Gap(14).AlignItems(ui.Center).Children(func() {
+			ui.Row(c).Gap(14).AlignItems(ui.Start).Children(func() {
 				ui.Field(c, "独立 SOCKS5 端口", func() {
 					ui.TextInput(c, &d.socksPort).Width(100)
 				})
-				ui.Column(c).Gap(4).Padding(0, 6).Children(func() {
+				// The two boxes follow the field's own rhythm: the first lines
+				// up with the "独立 SOCKS5 端口" caption, the second with the
+				// input under it.
+				ui.Column(c).Gap(9).Children(func() {
 					ui.Checkbox(c, &d.inPool, "加入统一入口分流")
 					ui.Checkbox(c, &d.autoConnect, "应用启动时自动登录")
 				})

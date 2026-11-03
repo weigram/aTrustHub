@@ -250,6 +250,13 @@ func GetAuthInfoList(serverAddress string, serverPort int, bindInterface string,
 	return sess.GetAuthInfoList()
 }
 
+// ClientData returns the cookies and device id of this session in the same
+// shape Setup accepts, so a helper process can resume it without logging in
+// again — a second login would drop this session.
+func (c *Client) ClientData() ([]byte, error) {
+	return json.Marshal(auth.ClientAuthData{Cookies: c.cookies, DeviceID: c.DeviceID})
+}
+
 // OnlineStatus is the answer of a session validity probe.
 type OnlineStatus struct {
 	Username string

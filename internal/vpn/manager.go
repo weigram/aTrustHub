@@ -179,6 +179,9 @@ type endpoint struct {
 	login time.Duration
 	// probeFails counts consecutive health probes that failed.
 	probeFails int
+	// tunServed means the global TUN owns this point's tunnel and the GUI has
+	// handed its own session over.
+	tunServed bool
 	// 会话有效性监测状态。
 	aliveAt    time.Time
 	aliveState string
@@ -797,6 +800,9 @@ type candidate struct {
 	name string
 	sess Session
 	apps []App
+	// served means the global TUN carries this point, so a connection goes
+	// through the system route instead of a session.
+	served bool
 }
 
 func (m *Manager) online() []candidate {
@@ -805,10 +811,16 @@ func (m *Manager) online() []candidate {
 	out := make([]candidate, 0, len(m.order))
 	for _, id := range m.order {
 		ep := m.points[id]
-		if ep == nil || ep.state != StateOnline || ep.sess == nil || !ep.cfg.InPool {
+		if ep == nil || ep.state != StateOnline || !ep.cfg.InPool {
 			continue
 		}
-		out = append(out, candidate{id: id, name: ep.cfg.Name, sess: ep.sess, apps: ep.info.Apps})
+		if ep.sess == nil && !ep.tunServed {
+			continue
+		}
+		out = append(out, candidate{
+			id: id, name: ep.cfg.Name, sess: ep.sess,
+			apps: ep.info.Apps, served: ep.tunServed,
+		})
 	}
 	return out
 }
@@ -868,7 +880,13 @@ func (m *Manager) Dial(ctx context.Context, network, addr string) (net.Conn, err
 		tried[c.id] = true
 
 		start := time.Now()
-		conn, err := safeDial(ctx, c.sess, network, addr)
+		dial := func(dctx context.Context, dnetwork, daddr string) (net.Conn, error) {
+			return safeDial(dctx, c.sess, dnetwork, daddr)
+		}
+		if c.served {
+			dial = directDial
+		}
+		conn, err := dial(ctx, network, addr)
 		if err == nil {
 			m.recordSuccess(c.id, time.Since(start))
 			m.logAccess(host, addr, c)
@@ -1134,6 +1152,127 @@ func (m *Manager) checkSession(id, name string, sess Session) {
 	}
 }
 
+// SessionDataProvider is a Session that can hand out its cookies, so the TUN
+// helper can resume the very same login.
+type SessionDataProvider interface {
+	ClientData() ([]byte, error)
+}
+
+// SetTunServed hands the tunnel of the given points over to the global TUN
+// helper. The GUI closes its own session for them: aTrust keeps one tunnel per
+// session, and with two of them the server keeps dropping one, which makes
+// every request stall and eventually everything stop working.
+func (m *Manager) SetTunServed(ids []string) {
+	served := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			served[id] = true
+		}
+	}
+	type handover struct {
+		id     string
+		name   string
+		proxy  *proxy.Server
+		sess   Session
+		direct bool
+	}
+	var work []handover
+	var reconnect []string
+
+	m.mu.Lock()
+	for _, id := range m.order {
+		ep := m.points[id]
+		if ep == nil {
+			continue
+		}
+		want := served[id] && ep.state == StateOnline
+		switch {
+		case want && !ep.tunServed && ep.sess != nil:
+			work = append(work, handover{
+				id: id, name: ep.cfg.Name, proxy: ep.proxy,
+				sess: ep.sess, direct: true,
+			})
+			ep.sess = nil
+			ep.tunServed = true
+			ep.aliveState = "由 TUN 接管"
+			ep.aliveErr = ""
+		case !want && ep.tunServed:
+			// TUN no longer carries it: log in again so the point gets its
+			// own tunnel back (a fresh proxy is created with that session).
+			ep.tunServed = false
+			ep.aliveState = ""
+			if ep.state == StateOnline {
+				reconnect = append(reconnect, id)
+			}
+		}
+	}
+	m.mu.Unlock()
+
+	for _, h := range work {
+		if h.proxy != nil {
+			h.proxy.SetDial(directDial)
+		}
+		if h.sess != nil {
+			_ = h.sess.Close()
+		}
+		m.logf("[%s] 已把隧道交给全局 TUN，应用侧改为系统路由", h.name)
+	}
+	for _, id := range reconnect {
+		m.Connect(id)
+	}
+	if len(work) > 0 || len(reconnect) > 0 {
+		m.changed()
+	}
+}
+
+// directDial lets the operating system route the connection, which under a
+// running TUN means into the tunnel.
+func directDial(ctx context.Context, network, addr string) (net.Conn, error) {
+	d := &net.Dialer{Timeout: 20 * time.Second}
+	return d.DialContext(ctx, network, addr)
+}
+
+// PersistSessions rewrites every online point's session file with the live
+// cookies. The helper then resumes that session instead of logging in again,
+// which would make the server drop the GUI's tunnel.
+func (m *Manager) PersistSessions(dir string) {
+	if dir == "" {
+		return
+	}
+	type item struct {
+		id   string
+		name string
+		sess Session
+	}
+	var items []item
+	m.mu.RLock()
+	for _, id := range m.order {
+		ep := m.points[id]
+		if ep == nil || ep.state != StateOnline || ep.sess == nil {
+			continue
+		}
+		if _, ok := ep.sess.(SessionDataProvider); !ok {
+			continue
+		}
+		items = append(items, item{id: id, name: ep.cfg.Name, sess: ep.sess})
+	}
+	m.mu.RUnlock()
+
+	for _, it := range items {
+		provider := it.sess.(SessionDataProvider)
+		data, err := provider.ClientData()
+		if err != nil {
+			m.logf("[%s] 无法读取当前会话：%v", it.name, err)
+			continue
+		}
+		if err := writeClientData(dir, it.id, data); err != nil {
+			m.logf("[%s] 无法写入会话文件：%v", it.name, err)
+			continue
+		}
+		m.logf("[%s] 已刷新会话文件，TUN 复用这次登录", it.name)
+	}
+}
+
 // CheckNow runs one validity probe for a point right away, ignoring its
 // schedule, so the user can test the setting.
 func (m *Manager) CheckNow(id string) bool {
@@ -1377,17 +1516,27 @@ func (m *Manager) TestDialTimeout(id, network, addr string, timeout time.Duratio
 	ep := m.points[id]
 	var sess Session
 	online := ep != nil && ep.state == StateOnline
+	served := false
 	if online {
 		sess = ep.sess
+		served = ep.tunServed
 	}
 	m.mu.RUnlock()
-	if !online || sess == nil {
+	if !online || (sess == nil && !served) {
 		return 0, errors.New("接入点未在线")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	start := time.Now()
-	conn, err := sess.Dial(ctx, network, addr)
+	// A point carried by the global TUN has no session: dial through the
+	// system route, exactly like a browser does.
+	dial := func(dctx context.Context, dnetwork, daddr string) (net.Conn, error) {
+		return sess.Dial(dctx, dnetwork, daddr)
+	}
+	if served {
+		dial = directDial
+	}
+	conn, err := dial(ctx, network, addr)
 	if err != nil {
 		return time.Since(start), err
 	}

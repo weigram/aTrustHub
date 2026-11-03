@@ -466,6 +466,24 @@ func tcpTunnelAuthDestinations(realDstHost string, port int, domain string, addr
 	return destAddr, destIP
 }
 
+// realAddrForDomain maps a fake address back to the address the server gave
+// for that domain. Anything else is returned untouched.
+func (c *Client) realAddrForDomain(domain string, addr *net.TCPAddr) *net.TCPAddr {
+	if c.dnsResource == nil {
+		return addr
+	}
+	ips, ok := c.dnsResource[domain]
+	if !ok || len(ips) == 0 {
+		return addr
+	}
+	for _, ip := range ips {
+		if ip.Equal(addr.IP) {
+			return addr
+		}
+	}
+	return &net.TCPAddr{IP: ips[0], Port: addr.Port}
+}
+
 func tcpTunnelRealDstHost(addr *net.TCPAddr, domain string, addrPretend bool) string {
 	if addrPretend && domain != "" {
 		return domain
@@ -499,6 +517,13 @@ func (c *Client) DialTCP(ctx context.Context, addr *net.TCPAddr) (net.Conn, erro
 	}
 	if appID == "" {
 		return nil, fmt.Errorf("host:%s port:%d is not resource: %w", addr.IP, addr.Port, client.ErrResourceNotFound)
+	}
+
+	// A fake address only exists so that two domains sharing one server IP can
+	// be told apart. The server wants the real address of the domain, so swap
+	// it back here; the domain itself still rides along in the request.
+	if domain != "" {
+		addr = c.realAddrForDomain(domain, addr)
 	}
 
 	c.BestNodesRWMutex.RLock()

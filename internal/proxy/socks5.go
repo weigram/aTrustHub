@@ -65,6 +65,23 @@ func New(opts Options) *Server {
 	return &Server{opts: opts, conns: map[net.Conn]struct{}{}}
 }
 
+// SetDial swaps the dialer used for new connections. When the global TUN
+// carries a point's traffic, its proxy must let the system route pick the
+// tunnel instead of opening a second tunnel on the same session: a session
+// only has one, and the two would fight over it.
+func (s *Server) SetDial(dial func(ctx context.Context, network, addr string) (net.Conn, error)) {
+	s.mu.Lock()
+	s.opts.Dial = dial
+	s.mu.Unlock()
+}
+
+// dialFunc returns the dialer in use, safe to call from a handler.
+func (s *Server) dialFunc() func(ctx context.Context, network, addr string) (net.Conn, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.opts.Dial
+}
+
 // Start binds the address and accepts clients in the background.
 func (s *Server) Start() error {
 	if s.opts.Dial == nil {
@@ -240,7 +257,7 @@ func (s *Server) handle(conn net.Conn) {
 	_ = conn.SetDeadline(time.Time{})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	remote, err := s.opts.Dial(ctx, "tcp", target)
+	remote, err := s.dialFunc()(ctx, "tcp", target)
 	cancel()
 	if err != nil {
 		s.reply(conn, replyHostUnreachable)

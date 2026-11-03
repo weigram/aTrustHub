@@ -92,6 +92,14 @@ var tunFakeRanges = []string{
 // back to the system authorization prompt.
 
 // startGlobalTUN runs one native aTrust TUN stack per online access point.
+// splitIDs turns the comma-joined snapshot back into a list.
+func splitIDs(snapshot string) []string {
+	if snapshot == "" {
+		return nil
+	}
+	return strings.Split(snapshot, ",")
+}
+
 // tunConfigFor builds the helper configuration from the online access points.
 func (a *app) tunConfigFor() (tunConfigFile, error) {
 	cfg := tunConfigFile{DNSBind: "127.0.0.1:53"}
@@ -162,6 +170,10 @@ func (a *app) startGlobalTUN(id string) {
 		return
 	}
 	_ = os.Chmod(helper, 0o755)
+
+	// The helper resumes the GUI's login, so its session file must carry the
+	// SID in use right now; a second login would drop this session.
+	a.mgr.PersistSessions(a.dir)
 
 	cfg, err := a.tunConfigFor()
 	if err != nil {
@@ -263,6 +275,18 @@ func (a *app) startGlobalTUN(id string) {
 		a.tunMirror()
 	})
 	succeeded = true
+	// The helper owns the tunnel now: the point's own proxy must dial through
+	// the system, or the two tunnels would fight over one session. Read the
+	// online set directly: a.tunPoints is written by the queued win.Update
+	// above and may not be visible yet.
+	served := make([]string, 0, len(cfg.Points))
+	for _, v := range a.mgr.Views() {
+		if v.State == vpn.StateOnline {
+			served = append(served, v.ID)
+		}
+	}
+	a.mgr.SetTunServed(served)
+	a.tunLogf("TUN 已接管 %d 个接入点，应用侧代理改走系统路由", len(served))
 	a.persistTunState(true, id)
 }
 
@@ -325,6 +349,7 @@ func (a *app) maybeRefreshTUN() {
 		added, err := a.extendTUN(prev, nowSnap)
 		if err == nil && added {
 			a.tunPointsA.Store(nowSnap)
+			a.mgr.SetTunServed(splitIDs(nowSnap))
 			go a.win.Update(func() {
 				a.tunPoints = nowSnap
 				a.tunPending = false
@@ -351,6 +376,7 @@ func (a *app) maybeRefreshTUN() {
 // touching the tunnels that already work: the helper re-reads the config when
 // a reload file appears. It reports whether a reload was requested.
 func (a *app) extendTUN(prev, now string) (bool, error) {
+	a.mgr.PersistSessions(a.dir)
 	if prev == "" {
 		return false, fmt.Errorf("没有已建立的隧道")
 	}
@@ -377,6 +403,10 @@ func (a *app) extendTUN(prev, now string) (bool, error) {
 			return false, fmt.Errorf("有接入点离线")
 		}
 	}
+	// The helper resumes the GUI's login, so its session file must carry the
+	// SID in use right now; a second login would drop this session.
+	a.mgr.PersistSessions(a.dir)
+
 	cfg, err := a.tunConfigFor()
 	if err != nil {
 		return false, err
@@ -447,6 +477,8 @@ func lastLines(path string, n int) string {
 
 func (a *app) stopGlobalTUN() {
 	stopped := a.shutdownHelper(10 * time.Second)
+	// Back to the point's own tunnel.
+	a.mgr.SetTunServed(nil)
 	a.win.Update(func() {
 		a.tunOn = false
 		a.tunPID = 0

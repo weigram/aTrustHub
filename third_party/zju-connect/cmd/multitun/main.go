@@ -319,12 +319,12 @@ func startPoint(pc pointConfig, accessLog string, index int) (*point, error) {
 	if err != nil {
 		return nil, fmt.Errorf("underlay: %w", err)
 	}
-	// No SID here on purpose: the saved one goes stale after a while and the
-	// server then rejects the IP tunnel with "Invalid arguments". Leaving it
-	// empty makes the client authenticate with the saved cookies and pick up a
-	// fresh session, which is cheap and always correct.
+	// Reuse the GUI's session instead of logging in again: a second login for
+	// the same account makes the server drop the GUI's tunnel, and the two
+	// keep kicking each other. The GUI rewrites this file with a fresh SID
+	// before starting us, so the saved one is never stale.
 	cli := atrustclient.NewClient(atrustclient.ClientOptions{
-		Session:        atrustclient.SessionOptions{DeviceID: pc.DeviceID},
+		Session:        atrustclient.SessionOptions{SID: pc.SID, DeviceID: pc.DeviceID},
 		UnderlayDialer: under,
 	})
 	if _, err := cli.Setup(atrustclient.SetupOptions{
@@ -368,6 +368,7 @@ func startPoint(pc pointConfig, accessLog string, index int) (*point, error) {
 	}
 
 	res := resolve.NewResolver(st, remoteDNS, secondary, 0, domainResources, dnsResource, useRemoteDNS)
+	res.PreferFakeIP = true
 	if pc.FakeCIDR != "" {
 		if pool, perr := ippool.NewIPPool[[]client.DomainResource](pc.FakeCIDR); perr == nil {
 			res.IPPool = pool

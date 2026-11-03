@@ -151,9 +151,13 @@ func (s *Stack) handleInboundConn(lConn net.Conn, targetIP string, targetPort ui
 	domain, resources, ok := s.ipPool.GetDomain(net.ParseIP(targetIP))
 	ctx := context.Background()
 	if ok {
-		if resource, matched := client.MatchDomainResourceWhere(resources, "tcp", int(targetPort), func(resource client.DomainResource) bool {
-			return !resource.EnableTCPPrefL3
+		if resource, matched := client.MatchDomainResourceWhere(resources, "tcp", int(targetPort), func(client.DomainResource) bool {
+			return true
 		}); matched {
+			// A fake destination must go through the TCP tunnel (see
+			// processIPV4): an L3 packet would carry the fake address, which
+			// the server rejects.
+			resource.EnableTCPPrefL3 = false
 			log.DebugPrintf("IP to domain %s", domain)
 			ctx = context.WithValue(ctx, resolve.ContextKeyDomainResource, resource)
 			ctx = context.WithValue(ctx, resolve.ContextKeyResolveHost, domain)
