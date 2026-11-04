@@ -120,6 +120,10 @@ type AccessPoint struct {
 	SocksPort   int   `json:"socksPort"`
 	InPool      bool  `json:"inPool"`
 	AutoConnect bool  `json:"autoConnect"`
+	// LoginInBrowser asks the login window to hand the page to the system
+	// browser and take the callback address back by paste. Some SSO portals
+	// only finish their login in a real browser.
+	LoginInBrowser bool `json:"loginInBrowser,omitempty"`
 	CreatedAt   int64 `json:"createdAt,omitempty"`
 	// Monitor asks the portal now and then whether this access point's login
 	// is still the active one: another client signing in with the same account

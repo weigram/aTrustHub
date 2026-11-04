@@ -109,7 +109,7 @@ func wecomStaticHTML(title, instruction string, png []byte, showLocalBtn bool) s
 // shows a "本地企业微信认证" button that, clicked, calls onLocalLogin (the
 // desktop quick-login path). The window itself never reports the login
 // result; the caller's poller does.
-func openStaticQRWindow(ctx context.Context, title, instruction string, png []byte, showLocalBtn bool, onLocalLogin func(), done <-chan struct{}, onClose func()) error {
+func openStaticQRWindow(ctx context.Context, title, instruction string, png []byte, showLocalBtn bool, onLocalLogin func(say func(string)), done <-chan struct{}, onClose func()) error {
 	win := mygo.NewWindow(mygo.WindowOptions{
 		Title:           title,
 		Width:           360,
@@ -127,6 +127,22 @@ func openStaticQRWindow(ctx context.Context, title, instruction string, png []by
 		win.Close()
 		return errors.New("二维码窗口没有网页")
 	}
+	// say rewrites the instruction line, so a click always ends with a visible
+	// answer instead of looking like nothing happened.
+	say := func(msg string) {
+		if page == nil {
+			return
+		}
+		quoted, err := json.Marshal(msg)
+		if err != nil {
+			return
+		}
+		evalCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, _ = page.EvalContext(evalCtx,
+			`(function(){var p=document.querySelector('p');if(p){p.textContent=`+string(quoted)+`;}})()`)
+	}
+
 	var closed bool
 	closedCh := make(chan struct{})
 	win.OnClose(func(e *mygo.CloseEvent) {
@@ -142,7 +158,7 @@ func openStaticQRWindow(ctx context.Context, title, instruction string, png []by
 		if strings.HasPrefix(e.URL, "wwlocal://") {
 			e.PreventDefault()
 			if onLocalLogin != nil {
-				go onLocalLogin()
+				go onLocalLogin(say)
 			}
 		}
 	})
@@ -177,7 +193,7 @@ func openStaticQRWindow(ctx context.Context, title, instruction string, png []by
 					continue
 				}
 				if h, ok := raw.(string); ok && strings.Contains(h, "local") {
-					go onLocalLogin()
+					go onLocalLogin(say)
 					return
 				}
 			}
@@ -252,16 +268,20 @@ func (a *app) wecomStaticQRLogin(ctx context.Context, pointName, server, loginUR
 
 	// The "本地企业微信认证" button: detect the desktop client and ask it to
 	// confirm (免扫码). Scanning still works at any time.
-	onLocalLogin := func() {
-		ports := append(append([]int{}, settings.HTTPSPorts...), 50010, 50011, 50012)
+	onLocalLogin := func(say func(string)) {
+		say("正在查找电脑版企业微信…")
+		ports := append(append([]int{}, settings.HTTPSPorts...), 50010, 50011, 50012, 50013)
 		port, desktop := wecomDesktopState(ctx, ports, loginURL, settings.RedirectURI)
 		if !desktop {
-			logLine("未检测到电脑企业微信，请在手机企业微信扫码登录")
+			logLine("未检测到电脑企业微信（已尝试端口 %v），请在手机企业微信扫码登录", ports)
+			say("未检测到电脑版企业微信，请在手机上扫码（先打开企业微信客户端可免扫码）")
 			return
 		}
 		logLine("检测到电脑企业微信（端口 %d），发送确认请求", port)
+		say("已找到电脑版企业微信，请在弹出的窗口点击确认")
 		if err := wecomBindWeCom(ctx, port, loginURL, settings.ClientKey); err != nil {
 			logLine("发送确认请求失败：%v", err)
+			say("发送确认请求失败：" + err.Error())
 			return
 		}
 		logLine("已请求电脑企业微信确认，请在企业微信里点「确认登录」")

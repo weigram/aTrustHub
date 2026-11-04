@@ -84,8 +84,18 @@ func connectZJU(ctx context.Context, opts ZJUOptions, point model.AccessPoint, c
 		return nil, err
 	}
 
+	// Resume the saved session when possible: Setup then skips the login
+	// entirely, so a WeCom point does not ask for a new QR code after a
+	// disconnect. Everything it needs is already on disk.
+	resumeSID, resumeDevice := savedSessionIDs(clientData)
+	resourceData, _ := readResourceDump(opts.DataDir, point.ID)
+
 	client := atrustclient.NewClient(atrustclient.ClientOptions{
-		Session:        atrustclient.SessionOptions{Username: point.Username},
+		Session: atrustclient.SessionOptions{
+			Username: point.Username,
+			SID:      resumeSID,
+			DeviceID: resumeDevice,
+		},
 		UnderlayDialer: under,
 	})
 	cleanupClient := true
@@ -110,8 +120,27 @@ func connectZJU(ctx context.Context, opts ZJUOptions, point model.AccessPoint, c
 			LoginMethod:              loginMethod,
 			TOTPSecret:               creds.TOTP,
 			ClientData:               clientData,
+			ResourceData:             resourceData,
 			BestNodesRefreshInterval: 90 * time.Second,
 		})
+		if err != nil && resumeSID != "" {
+			// The saved session is stale: fall back to authenticating with the
+			// saved cookies, which still avoids a fresh QR code when possible.
+			zjuLog.Printf("[%s] 复用会话失败，改用已保存的凭据重新认证：%v", point.Name, err)
+			client.Close()
+			client = atrustclient.NewClient(atrustclient.ClientOptions{
+				Session:        atrustclient.SessionOptions{Username: point.Username},
+				UnderlayDialer: under,
+			})
+			data, err = client.Setup(atrustclient.SetupOptions{
+				ServerAddress:            point.Server,
+				ServerPort:               point.Port,
+				LoginMethod:              loginMethod,
+				TOTPSecret:               creds.TOTP,
+				ClientData:               clientData,
+				BestNodesRefreshInterval: 90 * time.Second,
+			})
+		}
 		done <- setupResult{data: data, err: err}
 	}()
 
@@ -438,6 +467,40 @@ var (
 type SessionWatcher interface {
 	Done() <-chan struct{}
 	Err() error
+}
+
+// savedSessionIDs pulls the session id and device id out of a saved session,
+// so Setup can resume it without logging in.
+func savedSessionIDs(clientData []byte) (sid, deviceID string) {
+	if len(clientData) == 0 {
+		return "", ""
+	}
+	var saved struct {
+		Cookies []struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		} `json:"cookies"`
+		DeviceID string `json:"device_id"`
+	}
+	if err := json.Unmarshal(clientData, &saved); err != nil {
+		return "", ""
+	}
+	for _, c := range saved.Cookies {
+		if c.Name == "sid" && c.Value != "" {
+			sid = c.Value
+			break
+		}
+	}
+	return sid, saved.DeviceID
+}
+
+// readResourceDump returns the resource list saved with the session, which is
+// what lets Setup resume instead of logging in.
+func readResourceDump(dir, id string) ([]byte, error) {
+	if dir == "" || id == "" {
+		return nil, errors.New("nothing to read")
+	}
+	return os.ReadFile(filepath.Join(dir, "atrust", id+".resource.json"))
 }
 
 func writeResourceDump(dir, id string, data []byte) (string, error) {

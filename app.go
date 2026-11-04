@@ -31,7 +31,7 @@ const version = "0.1.0"
 // app is everything the window shows and the manager that does the work.
 // appBuild is shown in the footer and the startup log so an old running
 // instance is easy to tell apart from a freshly built one.
-const appBuild = "0.26.1"
+const appBuild = "0.26.4"
 
 type app struct {
 	win   *mygo.Window
@@ -59,6 +59,9 @@ type app struct {
 	// resumed for this point once it logs in, so the switch reflects intent.
 	tunWanted      bool
 	tunResumeTried bool
+	// logoutAsk holds the point waiting for the "forget authentication"
+	// confirmation.
+	logoutAsk string
 	// quitAsk shows the confirmation before the app really exits.
 	quitAsk bool
 	// update holds the newer release found at startup, if any.
@@ -131,6 +134,7 @@ type editorDraft struct {
 	socksPort     string
 	inPool        bool
 	autoConnect   bool
+	browserLogin  bool
 	monitor       bool
 	monitorEvery  string
 	secretStore   string
@@ -331,6 +335,8 @@ func (a *app) start() {
 
 	// Ask GitHub for a newer release in the background, so a blocked mirror
 	// can never hold up the window.
+	// Desktop quick-login diagnostics go to the same log the user reads.
+	wecomLogHook = func(line string) { a.bus.Add("app", line) }
 	go a.checkForUpdate()
 
 	// Make sure the first window is on screen even if the remembered state or
@@ -428,9 +434,9 @@ func (a *app) credentials(id string) (vpn.Credentials, error) {
 	}
 	var external func(context.Context, string) (string, error)
 	if point != nil && (mode == model.AuthModeAuto || mode == model.AuthModeWeCom) {
-		name, server := point.Name, point.Server
+		name, server, inBrowser := point.Name, point.Server, point.LoginInBrowser
 		external = func(ctx context.Context, loginURL string) (string, error) {
-			return a.externalLogin(ctx, name, server, loginURL)
+			return a.externalLogin(ctx, name, server, loginURL, inBrowser)
 		}
 	}
 	if mode == model.AuthModeWeCom {

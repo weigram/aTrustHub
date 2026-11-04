@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -122,11 +123,34 @@ func wecomLocalPost(ctx context.Context, port int, path string, body any) (map[s
 
 // wecomBridge is the HTTP client for a WeCom desktop client's local bridge,
 // which serves HTTPS on localhost.work.weixin.qq.com with its own certificate.
+// wecomLogf writes a diagnostic line about the desktop quick-login bridge.
+func wecomLogf(format string, args ...any) {
+	if wecomLogHook != nil {
+		wecomLogHook(fmt.Sprintf(format, args...))
+	}
+}
+
+// wecomLogHook is set by the app so bridge diagnostics land in its log.
+var wecomLogHook func(string)
+
 func wecomBridge() *http.Client {
 	return &http.Client{
 		Timeout: 5 * time.Second,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true, ServerName: "localhost.work.weixin.qq.com"},
+			// The desktop client listens on the loopback interface and is
+			// reached by that name; resolving it needs a hosts entry that
+			// Windows does not always have. Dialling 127.0.0.1 directly keeps
+			// the Host header and the certificate name while removing that
+			// dependency.
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				_, port, err := net.SplitHostPort(addr)
+				if err != nil {
+					return nil, err
+				}
+				d := &net.Dialer{Timeout: 2 * time.Second}
+				return d.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", port))
+			},
 		},
 	}
 }
@@ -134,9 +158,15 @@ func wecomBridge() *http.Client {
 // wecomBridgePost posts JSON to the desktop client's local bridge. The
 // bridge verifies the Referer of the login page.
 func wecomBridgePost(ctx context.Context, port int, path, referer string, body map[string]any) (map[string]any, error) {
+	return wecomBridgePostScheme(ctx, "https", port, path, referer, body)
+}
+
+// wecomBridgePostScheme posts to the desktop bridge over https or http, so a
+// client build that only exposes one of them is still found.
+func wecomBridgePostScheme(ctx context.Context, scheme string, port int, path, referer string, body map[string]any) (map[string]any, error) {
 	raw, _ := json.Marshal(body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://localhost.work.weixin.qq.com:"+strconv.Itoa(port)+path, bytes.NewReader(raw))
+		scheme+"://localhost.work.weixin.qq.com:"+strconv.Itoa(port)+path, bytes.NewReader(raw))
 	if err != nil {
 		return nil, err
 	}
@@ -181,18 +211,22 @@ func loginStateOf(out map[string]any) bool {
 // of its local bridge ports, and returns that port. The ports come from the
 // login page's pc_https_port list plus known fallbacks.
 func wecomDesktopState(ctx context.Context, ports []int, referer, redirectURI string) (int, bool) {
+	body := map[string]any{
+		"redirect_uri": redirectURI,
+		"scene":        1, // PC_LOGIN
+	}
 	for _, port := range ports {
-		ctxShort, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
-		out, err := wecomBridgePost(ctxShort, port, "/checkLoginState", referer, map[string]any{
-			"redirect_uri": redirectURI,
-			"scene":        1, // PC_LOGIN
-		})
-		cancel()
-		if err != nil {
-			continue
-		}
-		if loginStateOf(out) {
-			return port, true
+		for _, scheme := range []string{"https", "http"} {
+			ctxShort, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+			out, err := wecomBridgePostScheme(ctxShort, scheme, port, "/checkLoginState", referer, body)
+			cancel()
+			if err != nil {
+				continue
+			}
+			wecomLogf("企业微信桥接端口 %d（%s）登录状态：%v", port, scheme, out)
+			if loginStateOf(out) {
+				return port, true
+			}
 		}
 	}
 	return 0, false

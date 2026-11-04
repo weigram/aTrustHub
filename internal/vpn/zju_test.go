@@ -228,3 +228,40 @@ func TestAuthMethodLabel(t *testing.T) {
 		t.Errorf("label = %q", got)
 	}
 }
+
+func TestSavedSessionIDs(t *testing.T) {
+	data := []byte(`{"device_id":"abc123","cookies":[{"name":"lang","value":"zh"},{"name":"sid","value":"SID-9"}]}`)
+	sid, dev := savedSessionIDs(data)
+	if sid != "SID-9" || dev != "abc123" {
+		t.Fatalf("sid=%q dev=%q", sid, dev)
+	}
+	if sid, dev := savedSessionIDs(nil); sid != "" || dev != "" {
+		t.Fatal("空数据应返回空值")
+	}
+	if sid, dev := savedSessionIDs([]byte("not json")); sid != "" || dev != "" {
+		t.Fatal("坏数据应返回空值")
+	}
+	// 没有 sid 的会话不能当作可复用
+	sid, _ = savedSessionIDs([]byte(`{"device_id":"d","cookies":[{"name":"lang","value":"zh"}]}`))
+	if sid != "" {
+		t.Fatalf("无 sid 时不应返回 %q", sid)
+	}
+}
+
+func TestReadResourceDump(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := readResourceDump(dir, "p1"); err == nil {
+		t.Fatal("文件不存在时应报错")
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "atrust"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want := []byte(`{"data":{"appList":{}}}`)
+	if err := os.WriteFile(filepath.Join(dir, "atrust", "p1.resource.json"), want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readResourceDump(dir, "p1")
+	if err != nil || string(got) != string(want) {
+		t.Fatalf("got=%q err=%v", got, err)
+	}
+}

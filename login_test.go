@@ -82,7 +82,7 @@ func TestExternalLoginMessage(t *testing.T) {
 	// The main window is nil in this test app, so the connector's promise
 	// is reported instead of trying to open a window.
 	a := testApp(t)
-	_, err := a.externalLogin(context.Background(), "网关", "vpn.example.edu.cn", "https://vpn.example.edu.cn/login")
+	_, err := a.externalLogin(context.Background(), "网关", "vpn.example.edu.cn", "https://vpn.example.edu.cn/login", false)
 	if err == nil {
 		t.Fatal("externalLogin succeeded without a window")
 	}
@@ -197,5 +197,79 @@ func TestIsWWLoginURL(t *testing.T) {
 	}
 	if isWWLoginURL("https://open.work.weixin.qq.com/wwopen/sso/qrConnect") {
 		t.Error("qr page misclassified")
+	}
+}
+
+func TestLandedOnPortal(t *testing.T) {
+	const server = "zeroportal.example.net"
+	cases := []struct {
+		url  string
+		want bool
+	}{
+		{"https://zeroportal.example.net:8888/portal/", true},
+		{"https://zeroportal.example.net/portal", true},
+		{"https://zeroportal.example.net/portal/shortcut.html", true},
+		{"https://zeroportal.example.net/passport/v1/auth/cas?ticket=ST-1", false},
+		{"https://zeroportal.example.net/passport/v1/public/casLogin", false},
+		{"https://idaas.example.cn/login", false},
+		{"http://zeroportal.example.net/portal/", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := landedOnPortal(c.url, server); got != c.want {
+			t.Errorf("landedOnPortal(%q) = %v, want %v", c.url, got, c.want)
+		}
+	}
+}
+
+func TestCallbackFromURLTakesTicketAndCode(t *testing.T) {
+	cas := "https://a.example.net/passport/v1/auth/cas?sfDomain=cas1&ticket=ST-42"
+	raw, ok := callbackFromURL(cas)
+	if !ok || raw != cas {
+		t.Fatalf("cas callback: %q %v", raw, ok)
+	}
+	if _, ok := callbackFromURL("https://a.example.net/passport/v1/auth/cas?sfDomain=cas1"); ok {
+		t.Fatal("没有 ticket 不应算回调")
+	}
+	if _, ok := callbackFromURL("https://a.example.net/portal/"); ok {
+		t.Fatal("门户页不应算回调")
+	}
+}
+
+func TestParsePageURLs(t *testing.T) {
+	got := parsePageURLs(`["https://a.net/portal/","https://a.net/passport/v1/auth/cas?ticket=ST-1"]`)
+	if len(got) != 2 || got[1] == "" {
+		t.Fatalf("got %v", got)
+	}
+	if parsePageURLs("") != nil || parsePageURLs(42) != nil {
+		t.Fatal("非法输入应返回 nil")
+	}
+	if parsePageURLs("not json") != nil {
+		t.Fatal("坏 JSON 应返回 nil")
+	}
+}
+
+func TestParsePasteProbe(t *testing.T) {
+	href, text := parsePasteProbe(`["https://a.net/x#devtools","https://a.net/passport/v1/auth/cas?ticket=1"]`)
+	if !strings.Contains(href, "#devtools") || !strings.HasPrefix(text, "https://") {
+		t.Fatalf("href=%q text=%q", href, text)
+	}
+	if h, x := parsePasteProbe("nope"); h != "" || x != "" {
+		t.Fatal("坏输入应返回空")
+	}
+}
+
+func TestHostSet(t *testing.T) {
+	h := &hostSet{hosts: map[string]bool{}}
+	h.add("ZeroPortal.Example.Net")
+	if !h.has("zeroportal.example.net") || !h.has("ZEROPORTAL.EXAMPLE.NET") {
+		t.Fatal("主机名应大小写无关")
+	}
+	if h.has("idaas.example.cn") {
+		t.Fatal("未访问的主机不应放行")
+	}
+	h.add("")
+	if len(h.hosts) != 1 {
+		t.Fatalf("空主机不应记录：%v", h.hosts)
 	}
 }

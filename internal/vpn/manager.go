@@ -661,6 +661,9 @@ func (m *Manager) fail(id string, gen int, msg string) {
 
 // Disconnect logs one access point out.
 func (m *Manager) Disconnect(id string) {
+	// Keep the session file current: it is what lets the next login resume
+	// without a new QR code, and a stale copy would force one.
+	m.persistSession(id)
 	var closes []closeLater
 	m.mu.Lock()
 	m.stopEndpointLocked(id, &closes)
@@ -672,6 +675,36 @@ func (m *Manager) Disconnect(id string) {
 		if c.sess != nil {
 			_ = c.sess.Close()
 		}
+	}
+	m.changed()
+}
+
+// Logout forgets the saved authentication of a point: the next login starts
+// from a fresh QR code. Disconnect alone keeps it, so the next login resumes
+// the existing session instead.
+func (m *Manager) Logout(id string) {
+	m.Disconnect(id)
+	m.mu.RLock()
+	dir := m.dataDir
+	var name string
+	if ep := m.points[id]; ep != nil {
+		name = ep.cfg.Name
+	}
+	m.mu.RUnlock()
+	if dir == "" {
+		return
+	}
+	base := filepath.Join(dir, "atrust", id)
+	removed := false
+	for _, path := range []string{base + ".json", base + ".resource.json"} {
+		if err := os.Remove(path); err == nil {
+			removed = true
+		}
+	}
+	if removed {
+		m.logf("[%s] 已退出登录，清除保存的认证信息；下次登录需要重新扫码", name)
+	} else {
+		m.logf("[%s] 已退出登录（没有可清除的认证信息）", name)
 	}
 	m.changed()
 }
@@ -706,6 +739,7 @@ func (m *Manager) ConnectAll(autoOnly bool) int {
 
 // DisconnectAll logs every access point out.
 func (m *Manager) DisconnectAll() {
+	m.PersistSessions(m.dataDir)
 	m.mu.RLock()
 	ids := make([]string, 0, len(m.order))
 	for _, id := range m.order {
@@ -1177,6 +1211,9 @@ func (m *Manager) checkSession(id, name string, sess Session) {
 		ep.aliveRetryAt = time.Time{}
 		ep.retryStep = 0
 		m.mu.Unlock()
+		// A confirmed-good session is the best thing to keep on disk: it is
+		// what a later login resumes instead of asking for a new QR code.
+		m.persistSession(id)
 		m.changed()
 	default:
 		ep.aliveFails++
@@ -1239,6 +1276,34 @@ func (m *Manager) probeSavedSession(ctx context.Context, id string) (AliveStatus
 		Valid:    err == nil && online.Code == 0,
 	}
 	return res, err
+}
+
+// persistSession writes one point's live cookies back to disk without the
+// log noise of the batch version.
+func (m *Manager) persistSession(id string) {
+	m.mu.RLock()
+	ep := m.points[id]
+	dir := m.dataDir
+	var sess Session
+	var name string
+	if ep != nil {
+		sess, name = ep.sess, ep.cfg.Name
+	}
+	m.mu.RUnlock()
+	if sess == nil || dir == "" {
+		return
+	}
+	provider, ok := sess.(SessionDataProvider)
+	if !ok {
+		return
+	}
+	data, err := provider.ClientData()
+	if err != nil {
+		return
+	}
+	if err := writeClientData(dir, id, data); err != nil {
+		m.logf("[%s] 无法写入会话文件：%v", name, err)
+	}
 }
 
 // SetTunServed hands the tunnel of the given points over to the global TUN

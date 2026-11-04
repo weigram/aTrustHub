@@ -1,7 +1,15 @@
 {
   "name": "aTrustHub",
   "identifier": "app.atrust.hub",
-  "version": "0.26.1",
+  "version": "0.26.4",
   "copyright": "Copyright © 2026 aTrust Hub",
-  "out": "build"
+  "out": "build",
+  "macos": {
+    "infoPlist": {
+      "NSAppTransportSecurity": {
+        "NSAllowsArbitraryLoads": true,
+        "NSAllowsArbitraryLoadsInWebContent": true
+      }
+    }
+  }
 }

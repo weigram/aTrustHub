@@ -55,6 +55,10 @@ helpers-all:
 build:
 	$(GO) tool mygo build -skip-dmg
 
+## build-debug: 同 build，但保留 WebView 开发者工具（登录窗口按 F12 可打开）
+build-debug:
+	$(GO) tool mygo build -skip-dmg -debug
+
 ## dmg: 打包并生成磁盘映像（macOS）
 dmg:
 	$(GO) tool mygo build

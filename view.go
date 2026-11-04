@@ -72,6 +72,7 @@ func (a *app) view(c *ui.Context) {
 	a.editorView(c)
 	a.settingsView(c)
 	a.deleteView(c)
+	a.logoutView(c)
 	a.quitView(c)
 	a.appDetailView(c)
 }
@@ -836,6 +837,9 @@ func (a *app) pointButtons(c *ui.Context, v vpn.View) {
 		if ui.Button(c, "断开").Label("断开 " + v.Name).Clicked() {
 			go a.mgr.Disconnect(v.ID)
 		}
+		if ui.Button(c, "退出登录").Label("退出登录 " + v.Name).Clicked() {
+			a.askLogout(v)
+		}
 	case vpn.StateConnecting:
 		if ui.Button(c, "取消").Label("取消 " + v.Name).Clicked() {
 			go a.mgr.Disconnect(v.ID)
@@ -1166,6 +1170,11 @@ func (a *app) editorView(c *ui.Context) {
 					a.detectEditor()
 				}
 			})
+			// Some SSO portals only finish their login in a real browser;
+			// this hands the page over instead of showing it in the app.
+			if d.authMode != string(model.AuthModePassword) {
+				ui.Checkbox(c, &d.browserLogin, "用系统浏览器登录（弹窗里登不进去时勾选）")
+			}
 			if d.detecting {
 				ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
 					ui.Spinner(c)
@@ -1368,6 +1377,60 @@ func (a *app) deleteView(c *ui.Context) {
 	}
 }
 
+// askLogout refuses while the global TUN owns the session, then opens the
+// confirmation: forgetting the authentication forces a new QR scan.
+func (a *app) askLogout(v vpn.View) {
+	if a.tunOn {
+		for _, id := range splitIDs(a.tunPoints) {
+			if id == v.ID {
+				a.toast = "这个接入点正被全局 TUN 使用，先关闭 TUN 再退出登录"
+				return
+			}
+		}
+	}
+	a.win.Update(func() { a.logoutAsk = v.ID })
+}
+
+// logoutView confirms forgetting a point's saved login.
+func (a *app) logoutView(c *ui.Context) {
+	if a.logoutAsk == "" {
+		return
+	}
+	t := c.Theme()
+	name := "这个接入点"
+	for _, p := range a.cfg.Points {
+		if p.ID == a.logoutAsk {
+			name = "「" + p.Name + "」"
+		}
+	}
+	open := a.logoutAsk != ""
+	ui.Modal(c, &open, func() {
+		ui.Column(c).Width(440).Gap(10).Children(func() {
+			ui.Text(c, "退出登录").FontSize(17).Bold()
+			ui.Text(c, "退出 "+name+" 会清除保存的认证信息，下次登录需要重新扫码。").
+				FontSize(12).TextColor(t.Text)
+			ui.Text(c, "如果只是想暂时断开、稍后继续用同一个账号，点「断开」即可，"+
+				"那样下次登录会直接复用这次认证，不会弹二维码。").
+				FontSize(11).TextColor(t.TextMuted)
+			ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
+				if ui.Button(c, "取消").Clicked() {
+					a.logoutAsk = ""
+				}
+				if ui.Button(c, "确认退出登录").Background(t.Danger).
+					TextColor(ui.Hex("#ffffff")).Clicked() {
+					id := a.logoutAsk
+					a.logoutAsk = ""
+					go a.mgr.Logout(id)
+					a.toast = "已退出登录，下次登录需要重新扫码"
+				}
+			})
+		})
+	})
+	if !open {
+		a.logoutAsk = ""
+	}
+}
+
 // quitView asks before closing the app: quitting drops every tunnel and, with
 // the global TUN on, restores the system DNS.
 func (a *app) quitView(c *ui.Context) {
@@ -1418,6 +1481,7 @@ func (a *app) openNewEditor() {
 		socksPort:     strconv.Itoa(a.cfg.NextSocksPort()),
 		inPool:        true,
 		autoConnect:   false,
+		browserLogin:  false,
 		monitor:       true,
 		monitorEvery:  "300",
 		secretStore:   secretStoreLabel(a.cfg.Settings.SecretStore),
@@ -1441,6 +1505,7 @@ func (a *app) openEditor(v vpn.View) {
 		socksPort:     strconv.Itoa(p.SocksPort),
 		inPool:        p.InPool,
 		autoConnect:   p.AutoConnect,
+		browserLogin:  p.LoginInBrowser,
 		monitor:       p.MonitorEnabled(),
 		monitorEvery:  strconv.Itoa(p.MonitorIntervalSeconds()),
 		secretStore:   secretStoreLabel(a.cfg.Settings.SecretStore),
@@ -1502,7 +1567,8 @@ func (a *app) saveEditor() {
 		LoginDomain: strings.TrimSpace(d.domain),
 		SocksPort:   socksPort,
 		InPool:      d.inPool,
-		AutoConnect: d.autoConnect,
+		AutoConnect:    d.autoConnect,
+		LoginInBrowser: d.browserLogin,
 	}
 	monitor := d.monitor
 	p.Monitor = &monitor
