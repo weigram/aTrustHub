@@ -31,7 +31,7 @@ const version = "0.1.0"
 // app is everything the window shows and the manager that does the work.
 // appBuild is shown in the footer and the startup log so an old running
 // instance is easy to tell apart from a freshly built one.
-const appBuild = "0.26.6"
+const appBuild = "0.26.7"
 
 type app struct {
 	win   *mygo.Window
@@ -59,6 +59,10 @@ type app struct {
 	// resumed for this point once it logs in, so the switch reflects intent.
 	tunWanted      bool
 	tunResumeTried bool
+	// loginPage is the page of the login window on screen, so the menu can open
+	// its developer tools.
+	loginPage   *mygo.Page
+	loginPageMu sync.Mutex
 	// logoutAsk holds the point waiting for the "forget authentication"
 	// confirmation.
 	logoutAsk string
@@ -306,6 +310,50 @@ func resolveDataDir() (string, error) {
 	return dir, os.MkdirAll(dir, 0o700)
 }
 
+// setupMenu installs the app menu. It keeps the usual App/Edit/Window menus
+// and adds a 视图 menu whose 开发者工具 item (F12) opens the login window's
+// inspector on request.
+func (a *app) setupMenu() {
+	menu := mygo.NewMenu([]*mygo.MenuItem{
+		{Role: mygo.RoleAppMenu},
+		{Role: mygo.RoleEditMenu},
+		{Label: "视图", Submenu: []*mygo.MenuItem{
+			{Label: "开发者工具（登录窗口）", Accelerator: "F12", Click: func(*mygo.MenuItem, *mygo.Window) {
+				a.openLoginDevTools()
+			}},
+			{Label: "开发者工具", Accelerator: "CmdOrCtrl+Shift+I", Click: func(*mygo.MenuItem, *mygo.Window) {
+				a.openLoginDevTools()
+			}},
+			mygo.Separator(),
+			{Role: mygo.RoleViewMenu},
+		}},
+		{Role: mygo.RoleWindowMenu},
+	})
+	mygo.App.SetMenu(menu)
+}
+
+// setLoginPage records (or clears) the page of the login window on screen.
+func (a *app) setLoginPage(p *mygo.Page) {
+	a.loginPageMu.Lock()
+	a.loginPage = p
+	a.loginPageMu.Unlock()
+}
+
+// openLoginDevTools opens the developer tools of the login window: what F12 in
+// the 视图 menu does. Opening it unprompted froze the whole app, so the user
+// asks for it.
+func (a *app) openLoginDevTools() {
+	a.loginPageMu.Lock()
+	p := a.loginPage
+	a.loginPageMu.Unlock()
+	if p == nil {
+		a.toast = "先打开一个接入点的登录窗口"
+		a.win.Update(func() {})
+		return
+	}
+	p.OpenDevTools()
+}
+
 func (a *app) start() {
 	a.createWindow()
 
@@ -335,6 +383,7 @@ func (a *app) start() {
 
 	// Ask GitHub for a newer release in the background, so a blocked mirror
 	// can never hold up the window.
+	a.setupMenu()
 	// Desktop quick-login diagnostics go to the same log the user reads.
 	wecomLogHook = func(line string) { a.bus.Add("app", line) }
 	go a.checkForUpdate()

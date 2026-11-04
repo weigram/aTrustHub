@@ -249,7 +249,6 @@ func (a *app) externalLogin(ctx context.Context, pointName, server, loginURL str
 	var harvestOnce sync.Once
 	askProvider := func() {
 		harvestOnce.Do(func() {
-			reportPageSession(page, logLine)
 			target := loginURL
 			if idp := identityProviderURL(ctx, loginURL, server); idp != "" {
 				target = idp
@@ -265,40 +264,6 @@ func (a *app) externalLogin(ctx context.Context, pointName, server, loginURL str
 			}()
 		})
 	}
-
-	// A light poll, 2 s apart, watches only the page's own address. It is what
-	// notices the debug buttons and a page that stopped moving; the login
-	// itself is followed through the navigation callbacks below, because
-	// querying a heavy single sign-on page often enough to matter freezes it.
-	go func() {
-		lastHref := ""
-		lastChange := time.Now()
-		idleLogged := false
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
-			evalCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-			raw, err := page.EvalContext(evalCtx, `(function(){ try { return location.href || ''; } catch (e) { return ''; } })()`)
-			cancel()
-			if err != nil {
-				continue
-			}
-			href, _ := raw.(string)
-			if href != lastHref {
-				lastHref, lastChange, idleLogged = href, time.Now(), false
-			} else if !idleLogged && time.Since(lastChange) > 45*time.Second {
-				idleLogged = true
-				logLine("登录页 45 秒没有变化，停在 %s", loginPageForLog(href))
-			}
-		}
-	}()
 
 	// aTrust appliances usually serve a self-signed certificate, which the
 	// WebView refuses by default: the login page then stays blank. Accept it
@@ -449,12 +414,9 @@ func (a *app) externalLogin(ctx context.Context, pointName, server, loginURL str
 	}
 	loginWin.Show()
 	loginWin.Focus()
-	// The inspector is opened right away: the login page is where a broken
-	// request has to be watched, and waiting for a click is too late.
-	go func() {
-		time.Sleep(700 * time.Millisecond)
-		page.OpenDevTools()
-	}()
+	// 记下这个页面，菜单里的「开发者工具」(F12) 打开的就是它。
+	a.setLoginPage(page)
+	defer a.setLoginPage(nil)
 
 	// A portal whose login never finishes inside the WebView would otherwise
 	// wait forever: after two idle minutes, hand the page to the browser.
@@ -555,69 +517,6 @@ func parsePasteProbe(raw any) (href, text string) {
 		return "", ""
 	}
 	return parts[0], parts[1]
-}
-
-// reportPageErrors writes the page's own JavaScript errors to the app log,
-// which is what a page that never renders usually leaves behind.
-var pageErrorsReported int
-
-func reportPageErrors(page *mygo.Page, logLine func(string, ...any)) {
-	if page == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	raw, err := page.EvalContext(ctx, `(function(){ try { return JSON.stringify((window.__hubErrors||[]).slice(-6)); } catch (e) { return '[]'; } })()`)
-	if err != nil {
-		return
-	}
-	text, _ := raw.(string)
-	if text == "" || text == "[]" || len(text) <= pageErrorsReported {
-		return
-	}
-	pageErrorsReported = len(text)
-	logLine("页面脚本错误：%s", text)
-}
-
-// reportPageSession logs what the logged-in page keeps client side. A portal
-// that finishes the login with an XHR keeps the session in cookies, and only
-// what JavaScript can read can be taken over by the tunnel.
-func reportPageSession(page *mygo.Page, logLine func(string, ...any)) {
-	if page == nil {
-		return
-	}
-	const probe = `(function(){
-  var out = {cookie: '', ls: [], ss: []};
-  try { out.cookie = document.cookie || ''; } catch (e) {}
-  try { for (var i = 0; i < localStorage.length; i++) { var k = localStorage.key(i); out.ls.push(k + '=' + (localStorage.getItem(k) || '').length); } } catch (e) {}
-  try { for (var i = 0; i < sessionStorage.length; i++) { var k = sessionStorage.key(i); out.ss.push(k + '=' + (sessionStorage.getItem(k) || '').length); } } catch (e) {}
-  return JSON.stringify(out);
-})()`
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	raw, err := page.EvalContext(ctx, probe)
-	if err != nil {
-		logLine("读取页面会话失败：%v", err)
-		return
-	}
-	text, _ := raw.(string)
-	var got struct {
-		Cookie string   `json:"cookie"`
-		LS     []string `json:"ls"`
-		SS     []string `json:"ss"`
-	}
-	if err := json.Unmarshal([]byte(text), &got); err != nil {
-		logLine("页面会话无法解析：%v", err)
-		return
-	}
-	names := make([]string, 0, 8)
-	for _, part := range strings.Split(got.Cookie, ";") {
-		if kv := strings.SplitN(strings.TrimSpace(part), "=", 2); len(kv) == 2 && kv[0] != "" {
-			names = append(names, fmt.Sprintf("%s(%d)", kv[0], len(kv[1])))
-		}
-	}
-	logLine("页面会话：cookie=[%s] localStorage=[%s] sessionStorage=[%s]",
-		strings.Join(names, " "), strings.Join(got.LS, " "), strings.Join(got.SS, " "))
 }
 
 // hostSet is the set of hosts one login window has reached.
