@@ -236,18 +236,6 @@ func TestCallbackFromURLTakesTicketAndCode(t *testing.T) {
 	}
 }
 
-func TestParsePageURLs(t *testing.T) {
-	got := parsePageURLs(`["https://a.net/portal/","https://a.net/passport/v1/auth/cas?ticket=ST-1"]`)
-	if len(got) != 2 || got[1] == "" {
-		t.Fatalf("got %v", got)
-	}
-	if parsePageURLs("") != nil || parsePageURLs(42) != nil {
-		t.Fatal("非法输入应返回 nil")
-	}
-	if parsePageURLs("not json") != nil {
-		t.Fatal("坏 JSON 应返回 nil")
-	}
-}
 
 func TestParsePasteProbe(t *testing.T) {
 	href, text := parsePasteProbe(`["https://a.net/x#devtools","https://a.net/passport/v1/auth/cas?ticket=1"]`)

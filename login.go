@@ -243,16 +243,39 @@ func (a *app) externalLogin(ctx context.Context, pointName, server, loginURL str
 		return true
 	}
 	// A single sign-on that redirects several times does not always reach the
-	// navigation callbacks, and one of those redirects is the only place the
-	// authorization code appears. Polling the address of the page catches it
-	// either way; when the code was already used by this window, asking the
-	// provider again yields a new one, which is what the tunnel resumes with.
+	// askProvider is the "logged in, get a fresh code" step: the access point
+	// itself would answer with the portal, since this window already holds its
+	// session, but the identity provider hands out a new ticket when asked
+	// directly.
+	var harvestOnce sync.Once
+	askProvider := func() {
+		harvestOnce.Do(func() {
+			reportPageSession(page, logLine)
+			target := loginURL
+			if idp := identityProviderURL(ctx, loginURL, server); idp != "" {
+				target = idp
+				logLine("已登录，向身份提供方重新取一次票：%s", loginPageForLog(idp))
+			} else {
+				logLine("已登录，重新请求认证地址以取票")
+			}
+			go func() {
+				time.Sleep(300 * time.Millisecond)
+				if err := page.LoadURL(target); err != nil {
+					logLine("重新取票失败：%v", err)
+				}
+			}()
+		})
+	}
+
+	// A light poll, 2 s apart, watches only the page's own address. It is what
+	// notices the debug buttons and a page that stopped moving; the login
+	// itself is followed through the navigation callbacks below, because
+	// querying a heavy single sign-on page often enough to matter freezes it.
 	go func() {
-		harvested := false
 		lastHref := ""
 		lastChange := time.Now()
 		idleLogged := false
-		ticker := time.NewTicker(500 * time.Millisecond)
+		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
@@ -262,66 +285,28 @@ func (a *app) externalLogin(ctx context.Context, pointName, server, loginURL str
 				return
 			case <-ticker.C:
 			}
-			// The identity provider may finish inside an iframe, where the
-			// callback address never becomes the page's own address. A frame
-			// that lands back on the aTrust server is same-origin, so its
-			// address can be read from here.
 			evalCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-			raw, err := page.EvalContext(evalCtx, pageURLsProbe)
+			raw, err := page.EvalContext(evalCtx, `(function(){ try { return location.href || ''; } catch (e) { return ''; } })()`)
 			cancel()
 			if err != nil {
 				continue
 			}
-			hrefs := parsePageURLs(raw)
-			for _, one := range hrefs {
-				if accept(one) {
-					return
-				}
-			}
-			joined := hrefsJoined(hrefs)
-			if strings.Contains(joined, "#devtools") {
-				logLine("打开开发者工具")
+			href, _ := raw.(string)
+			reportPageErrors(page, logLine)
+			if strings.Contains(href, "#devtools") {
 				page.OpenDevTools()
 			}
-			if strings.Contains(joined, "#browser") && !pasteMode.Load() {
+			if strings.Contains(href, "#browser") && !pasteMode.Load() {
 				pasteMode.Store(true)
 				fallbackURL = ""
 				logLine("按用户要求改用系统浏览器登录")
 				startPasteLogin()
 			}
-			href := ""
-			if len(hrefs) > 0 {
-				href = hrefs[0]
-			}
 			if href != lastHref {
 				lastHref, lastChange, idleLogged = href, time.Now(), false
-			} else if !idleLogged && time.Since(lastChange) > 30*time.Second {
+			} else if !idleLogged && time.Since(lastChange) > 45*time.Second {
 				idleLogged = true
-				logLine("登录页 30 秒没有变化，停在 %s", loginPageForLog(href))
-			}
-			if href == "" || strings.HasPrefix(href, "about:") {
-				continue
-			}
-			if !harvested && landedOnPortal(href, server) {
-				harvested = true
-				reportPageSession(page, logLine)
-				// Asking aTrust again returns the portal, because this window
-				// already holds its session. The identity provider keeps its
-				// own session and hands out a fresh ticket when asked directly,
-				// which is the address the tunnel needs.
-				target := loginURL
-				if idp := identityProviderURL(ctx, loginURL, server); idp != "" {
-					target = idp
-					logLine("已登录，向身份提供方重新取一次票：%s", loginPageForLog(idp))
-				} else {
-					logLine("已登录，重新请求认证地址以取票")
-				}
-				go func() {
-					time.Sleep(300 * time.Millisecond)
-					if err := page.LoadURL(target); err != nil {
-						logLine("重新取票失败：%v", err)
-					}
-				}()
+				logLine("登录页 45 秒没有变化，停在 %s", loginPageForLog(href))
 			}
 		}
 	}()
@@ -384,7 +369,12 @@ func (a *app) externalLogin(ctx context.Context, pointName, server, loginURL str
 	page.OnDidNavigate(func(rawURL string) {
 		visited.add(hostOf(rawURL))
 		logLine("登录页已到 %s", loginPageForLog(rawURL))
-		accept(rawURL)
+		if accept(rawURL) {
+			return
+		}
+		if landedOnPortal(rawURL, server) {
+			askProvider()
+		}
 	})
 	page.OnDidFailLoad(func(err *mygo.LoadError) {
 		logLine("登录页加载失败：%s（%s）", err.Description, loginPageForLog(err.URL))
@@ -470,6 +460,12 @@ func (a *app) externalLogin(ctx context.Context, pointName, server, loginURL str
 	}
 	loginWin.Show()
 	loginWin.Focus()
+	// The inspector is opened right away: the login page is where a broken
+	// request has to be watched, and waiting for a click is too late.
+	go func() {
+		time.Sleep(700 * time.Millisecond)
+		page.OpenDevTools()
+	}()
 
 	// A portal whose login never finishes inside the WebView would otherwise
 	// wait forever: after two idle minutes, hand the page to the browser.
@@ -557,6 +553,19 @@ func identityProviderURL(ctx context.Context, loginURL, server string) string {
 // the login pages are remote, and this keeps the shortcut working on all of
 // them without touching their markup.
 const devToolsShortcut = `(function(){
+  try {
+    if (!window.__hubErrors) {
+      window.__hubErrors = [];
+      window.addEventListener('error', function(e){
+        window.__hubErrors.push('error: ' + (e && e.message ? e.message : 'unknown') +
+          (e && e.filename ? ' @ ' + e.filename + ':' + e.lineno : ''));
+      }, true);
+      window.addEventListener('unhandledrejection', function(e){
+        window.__hubErrors.push('rejection: ' + (e && e.reason ? String(e.reason) : 'unknown'));
+      }, true);
+    }
+  } catch (e) {}
+
   var mark = function(tag){
     try { history.replaceState(null, '', '#' + tag); } catch (err) { location.hash = tag; }
   };
@@ -597,11 +606,6 @@ const devToolsShortcut = `(function(){
   }
 })()`
 
-// hrefsJoined makes one string of the addresses for a quick contains check.
-func hrefsJoined(hrefs []string) string {
-	return strings.Join(hrefs, " ")
-}
-
 // pasteProbe returns the page address and what was typed into the callback
 // field, so one poll covers both the shortcut and the address.
 const pasteProbe = `(function(){
@@ -622,30 +626,26 @@ func parsePasteProbe(raw any) (href, text string) {
 	return parts[0], parts[1]
 }
 
-// pageURLsProbe collects the addresses this page and its frames show, which is
-// where a callback inside an iframe appears.
-const pageURLsProbe = `(function(){
-  var out = [];
-  try { out.push(location.href); } catch (e) {}
-  try {
-    for (var i = 0; i < window.frames.length; i++) {
-      try { out.push(window.frames[i].location.href); } catch (e) {}
-    }
-  } catch (e) {}
-  return JSON.stringify(out);
-})()`
+// reportPageErrors writes the page's own JavaScript errors to the app log,
+// which is what a page that never renders usually leaves behind.
+var pageErrorsReported int
 
-// parsePageURLs reads what pageURLsProbe returned.
-func parsePageURLs(raw any) []string {
-	text, ok := raw.(string)
-	if !ok || text == "" {
-		return nil
+func reportPageErrors(page *mygo.Page, logLine func(string, ...any)) {
+	if page == nil {
+		return
 	}
-	var urls []string
-	if err := json.Unmarshal([]byte(text), &urls); err != nil {
-		return nil
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	raw, err := page.EvalContext(ctx, `(function(){ try { return JSON.stringify((window.__hubErrors||[]).slice(-6)); } catch (e) { return '[]'; } })()`)
+	if err != nil {
+		return
 	}
-	return urls
+	text, _ := raw.(string)
+	if text == "" || text == "[]" || len(text) <= pageErrorsReported {
+		return
+	}
+	pageErrorsReported = len(text)
+	logLine("页面脚本错误：%s", text)
 }
 
 // reportPageSession logs what the logged-in page keeps client side. A portal
@@ -1103,6 +1103,7 @@ func (a *app) browserLogin(ctx context.Context, pointName, server, loginURL stri
 				continue
 			}
 			href, text := parsePasteProbe(raw)
+			reportPageErrors(page, logLine)
 			if strings.Contains(href, "#devtools") {
 				page.OpenDevTools()
 				continue
