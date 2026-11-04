@@ -76,6 +76,29 @@ func (h *hub) addDomains(domains map[string][]client.DomainResource) {
 	}
 }
 
+// dial opens and closes one connection through a point's tunnel, which is what
+// tells a dead session from a reachable address.
+func (h *hub) dial(pointName, addr string) error {
+	h.mu.Lock()
+	p := h.points[pointName]
+	h.mu.Unlock()
+	if p == nil {
+		return fmt.Errorf("接入点 %s 不在 TUN 里", pointName)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
+	if err != nil {
+		return err
+	}
+	conn, err := p.client.DialTCP(ctx, tcpAddr)
+	if err != nil {
+		return err
+	}
+	_ = conn.Close()
+	return nil
+}
+
 // add starts one access point unless it is already running.
 func (h *hub) add(pc pointConfig) error {
 	h.mu.Lock()
@@ -91,6 +114,10 @@ func (h *hub) add(pc pointConfig) error {
 	}
 	h.points[pc.Name] = p
 	h.dns.Add(p.dns)
+	// The access point's own host often resolves only through corporate DNS.
+	// Without this, a client that reaches the portal by name (the app's own
+	// session checks do) waits on a public lookup that cannot answer.
+	h.dns.addInternalDomain(pc.Server)
 	if domains, err := p.client.DomainResources(); err == nil {
 		for name := range domains {
 			h.dns.addInternalDomain(name)
@@ -137,6 +164,42 @@ type point struct {
 	dns    zcdns.LocalServer
 }
 
+// serveProbes answers one dial request at a time, written as
+// "id|point|address" to the probe file, and records the outcome next to it.
+func serveProbes(path string, hub *hub) {
+	result := path + ".result"
+	last := ""
+	for {
+		time.Sleep(300 * time.Millisecond)
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		line := strings.TrimSpace(string(raw))
+		if line == "" || line == last {
+			continue
+		}
+		last = line
+		parts := strings.SplitN(line, "|", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		id, pointName, addr := parts[0], parts[1], parts[2]
+		start := time.Now()
+		err = hub.dial(pointName, addr)
+		outcome := map[string]any{"id": id, "ok": err == nil}
+		if err != nil {
+			outcome["ms"] = time.Since(start).Milliseconds()
+			outcome["error"] = err.Error()
+		} else {
+			outcome["ms"] = time.Since(start).Milliseconds()
+		}
+		if data, mErr := json.Marshal(outcome); mErr == nil {
+			_ = os.WriteFile(result, data, 0o666)
+		}
+	}
+}
+
 func main() {
 	// This is a standalone helper: a server SHUTDOWN must end the process so
 	// its cleanup (DNS, routes) runs and the GUI can start a fresh one.
@@ -149,6 +212,7 @@ func main() {
 	guiPID := flag.Int("gui-pid", 0, "exit when this process is gone")
 	guiFile := flag.String("gui-file", "", "exit when this heartbeat file goes stale")
 	reloadFile := flag.String("reload-file", "", "re-read the config when this file appears")
+	probeFile := flag.String("probe", "", "answer dial requests written to this file")
 	flag.Parse()
 	if *cfgPath == "" {
 		fatal("-config is required")
@@ -244,6 +308,13 @@ func main() {
 				reloadConfig(*cfgPath, hub)
 			}
 		}()
+	}
+
+	// The GUI cannot test an address by itself: the TUN stack completes the TCP
+	// handshake locally, so a dial succeeds even when the tunnel is dead. These
+	// requests are answered here, through the real tunnel.
+	if *probeFile != "" {
+		go serveProbes(*probeFile, hub)
 	}
 
 	// Keep the system pointed at our resolver: the aTrust stack's DNS setup

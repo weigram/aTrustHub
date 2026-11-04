@@ -2,6 +2,7 @@ package vpn
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -19,11 +20,18 @@ import (
 // zjuLoginMethod builds what ZJU-Connect's Setup needs for this access
 // point: a password login, or the callback of an external login such as
 // the WeCom QR code.
-func zjuLoginMethod(ctx context.Context, point model.AccessPoint, creds Credentials) (auth.LoginMethod, error) {
+func zjuLoginMethod(ctx context.Context, point model.AccessPoint, creds Credentials, hasSession bool) (auth.LoginMethod, error) {
 	switch model.AuthMode(point.AuthMode) {
 	case model.AuthModeAuto:
 		return autoLoginMethod(ctx, point, creds)
 	case model.AuthModeWeCom:
+		return externalLoginMethod(ctx, point, creds)
+	case model.AuthModeSSO:
+		// 浏览器只负责走完单点登录并交回授权码；登录本身仍由客户端完成，
+		// 这样隧道用的是它自己的设备号与签名，服务器不会拒绝。
+		if creds.ExternalLogin == nil {
+			return nil, errors.New("单点登录需要浏览器：请安装 Chrome 或 Edge")
+		}
 		return externalLoginMethod(ctx, point, creds)
 	default:
 		return passwordLoginMethod(point, creds, point.LoginDomain)
@@ -136,7 +144,7 @@ func externalLoginMethodFromInfo(ctx context.Context, point model.AccessPoint, c
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, err
 		}
-		return nil, fmt.Errorf("扫码登录未完成：%w", err)
+		return nil, fmt.Errorf("登录未完成：%w", err)
 	}
 	return loginMethodFromCallback(info, callback, point.Server)
 }
@@ -267,6 +275,15 @@ func loginMethodFromCallback(info auth.AuthInfo, callback, server string) (auth.
 		}
 		return auth.QyWechatLogin{Domain: domain, Callback: callback}, nil
 	case "auth/cas":
+		// 门户自己的快捷登录页也带票：票藏在 data 参数里，
+		// 页面脚本再把它交给服务器。
+		if path == "/portal/shortcut.html" {
+			ticket := ticketFromShortcut(u)
+			if ticket == "" {
+				return nil, errors.New("快捷登录地址里没有 ticket")
+			}
+			return auth.CASLogin{Domain: domain, Ticket: ticket}, nil
+		}
 		if path != "/passport/v1/auth/cas" || u.Query().Get("ticket") == "" {
 			return nil, errors.New("回调地址缺少 ticket")
 		}
@@ -338,4 +355,36 @@ func DetectAuthMethods(ctx context.Context, point model.AccessPoint) ([]AuthMeth
 		out = append(out, AuthMethod{Type: info.AuthType, Domain: info.LoginDomain, Name: info.AuthName})
 	}
 	return out, nil
+}
+
+// loginErrorFor turns a client's low-level error into what the user has to do
+// about it, for the modes that cannot fall back on a password.
+func loginErrorFor(point model.AccessPoint, err error) error {
+	if err == nil {
+		return nil
+	}
+	if model.AuthMode(point.AuthMode) != model.AuthModeSSO {
+		return err
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "not logged in") || strings.Contains(msg, "login method is nil") {
+		return errors.New("单点登录的会话已失效：请点接入点上的「登录」，用浏览器重新登录")
+	}
+	return err
+}
+
+// ticketFromShortcut pulls the ticket out of the portal's shortcut page, whose
+// data parameter carries {"ticket":"…","env":{…}}.
+func ticketFromShortcut(u *url.URL) string {
+	raw := u.Query().Get("data")
+	if raw == "" {
+		return ""
+	}
+	var payload struct {
+		Ticket string `json:"ticket"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.Ticket)
 }

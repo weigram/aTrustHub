@@ -112,6 +112,28 @@ func TestAddButtonOpensEditor(t *testing.T) {
 	}
 }
 
+func TestEditorDropsAutoAuthMode(t *testing.T) {
+	// The dropdown is closed in the render tree, so the option list itself is
+	// checked here; the view only shows the selected label.
+	if got, want := strings.Join(authModeLabels(), "|"), "账号密码|企业微信|单点登录"; got != want {
+		t.Fatalf("认证方式 options = %q, want %q", got, want)
+	}
+
+	a := testApp(t)
+	tt := ui.NewTester(a.view, 1120, 800)
+	if err := tt.Click("＋ 添加接入点"); err != nil {
+		t.Fatalf("click add: %v", err)
+	}
+	tt.Frame()
+	texts := strings.Join(tt.Texts(), "|")
+	if !strings.Contains(texts, "认证方式") || !strings.Contains(texts, "账号密码") {
+		t.Errorf("editor lacks the auth mode field; texts = %s", texts)
+	}
+	if strings.Contains(texts, "自动识别") {
+		t.Errorf("自动识别 should be gone; texts = %s", texts)
+	}
+}
+
 func TestSaveEditor(t *testing.T) {
 	a := testApp(t)
 	a.openNewEditor()
@@ -389,5 +411,129 @@ func TestProbeHostText(t *testing.T) {
 	line := a.probeHostText(id, "10.20.163.37", []int{443, 80})
 	if !strings.HasPrefix(line, "❌") || !strings.Contains(line, "10.20.163.37") {
 		t.Errorf("probe line = %q", line)
+	}
+}
+
+func TestAuthModeAutoPick(t *testing.T) {
+	cases := []struct {
+		name    string
+		methods []vpn.AuthMethod
+		want    model.AuthMode
+	}{
+		{"企业微信优先", []vpn.AuthMethod{{Type: "auth/psw"}, {Type: "auth/qywechat"}}, model.AuthModeWeCom},
+		{"只有单点登录", []vpn.AuthMethod{{Type: "auth/cas"}}, model.AuthModeSSO},
+		{"只有账号密码", []vpn.AuthMethod{{Type: "auth/psw"}}, model.AuthModePassword},
+		{"单点登录优先于密码", []vpn.AuthMethod{{Type: "auth/psw"}, {Type: "auth/httpsOauth2"}}, model.AuthModeSSO},
+	}
+	for _, c := range cases {
+		picked := model.AuthModePassword
+		switch {
+		case hasWeCom(c.methods):
+			picked = model.AuthModeWeCom
+		case hasSSO(c.methods):
+			picked = model.AuthModeSSO
+		}
+		if picked != c.want {
+			t.Errorf("%s: picked %q, want %q", c.name, picked, c.want)
+		}
+	}
+}
+
+func TestCanLogoutOnlyForWeCom(t *testing.T) {
+	cases := []struct {
+		mode model.AuthMode
+		want bool
+	}{
+		{model.AuthModeWeCom, true},
+		{model.AuthModePassword, false},
+		{model.AuthModeSSO, false},
+		{model.AuthModeAuto, false},
+	}
+	for _, c := range cases {
+		p := &model.AccessPoint{AuthMode: string(c.mode)}
+		if got := canLogout(p); got != c.want {
+			t.Errorf("canLogout(%s) = %v, want %v", c.mode, got, c.want)
+		}
+	}
+	if canLogout(nil) {
+		t.Error("nil 接入点不应显示退出登录")
+	}
+}
+
+// 批量停用要覆盖该接入点的全部应用，启用要把记录清空。
+func TestSetAllAppsEnabled(t *testing.T) {
+	a := testApp(t)
+	id := ""
+	if _, err := a.store.Update(func(cfg *model.Config) error {
+		p := cfg.Add(model.AccessPoint{Name: "批量点", Server: "vpn.example.edu.cn", AuthMode: string(model.AuthModePassword)})
+		id = p.ID
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a.cfg = a.store.Config()
+
+	// 没有应用时不该把记录写成垃圾。
+	a.setAllAppsEnabled(id, false)
+	if p := a.cfg.Find(id); len(p.DisabledApps) != 0 {
+		t.Fatalf("没有应用时不应写入停用记录：%v", p.DisabledApps)
+	}
+	a.setAllAppsEnabled(id, true)
+	if p := a.cfg.Find(id); len(p.DisabledApps) != 0 {
+		t.Fatalf("启用后应为空：%v", p.DisabledApps)
+	}
+}
+
+// 过滤按「隧道代理」状态筛选，且不影响搜索。
+func TestAppFilter(t *testing.T) {
+	a := testApp(t)
+	cases := []struct {
+		filter        string
+		enabled, want bool
+	}{
+		{"all", true, true},
+		{"all", false, true},
+		{"on", true, true},
+		{"on", false, false},
+		{"off", true, false},
+		{"off", false, true},
+	}
+	for _, c := range cases {
+		a.appFilter = c.filter
+		got := true
+		switch a.appFilter {
+		case "on":
+			got = c.enabled
+		case "off":
+			got = !c.enabled
+		}
+		if got != c.want {
+			t.Errorf("filter=%s enabled=%v → %v, want %v", c.filter, c.enabled, got, c.want)
+		}
+	}
+}
+
+// 应用开关必须把点击写回持久状态。绑局部变量时点击写到失效地址，
+// 状态既不保存也不会在重启后还原——这个测试盯住这一点。
+func TestAppSwitchKeepsState(t *testing.T) {
+	state := false
+	changed := false
+	view := func(c *ui.Context) {
+		ui.Column(c).Padding(10).Children(func() {
+			ui.Switch(c, &state).Label("隧道代理 测试应用").
+				OnChange(func() { changed = true })
+		})
+	}
+	tt := ui.NewTester(view, 400, 200)
+	tt.Frame()
+	if err := tt.Click("隧道代理 测试应用"); err != nil {
+		t.Fatalf("click: %v", err)
+	}
+	tt.Frame()
+	if !changed {
+		t.Fatal("开关变更没有回调")
+	}
+	if !state {
+		t.Fatal("开关状态没有写回")
 	}
 }

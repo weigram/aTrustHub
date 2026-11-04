@@ -157,6 +157,10 @@ func (a *app) externalLogin(ctx context.Context, pointName, server, loginURL str
 	// for these, never for an arbitrary host.
 	visited := &hostSet{hosts: map[string]bool{}}
 	visited.add(server)
+	// lastIdP remembers the identity provider's own address seen in this
+	// window. Asking it again is what yields a fresh ticket, and an address
+	// observed here is more reliable than re-deriving it over HTTP.
+	var lastIdP atomic.Value
 	var once sync.Once
 	result := make(chan loginResult, 1)
 	done := make(chan struct{})
@@ -250,7 +254,14 @@ func (a *app) externalLogin(ctx context.Context, pointName, server, loginURL str
 	askProvider := func() {
 		harvestOnce.Do(func() {
 			target := loginURL
-			if idp := identityProviderURL(ctx, loginURL, server); idp != "" {
+			idp := ""
+			if v, ok := lastIdP.Load().(string); ok {
+				idp = v
+			}
+			if idp == "" {
+				idp = identityProviderURL(ctx, loginURL, server)
+			}
+			if idp != "" && strings.Contains(idp, "/login") {
 				target = idp
 				logLine("已登录，向身份提供方重新取一次票：%s", loginPageForLog(idp))
 			} else {
@@ -306,6 +317,44 @@ func (a *app) externalLogin(ctx context.Context, pointName, server, loginURL str
 		}
 		return true
 	})
+	// The identity provider finishes a login with a script that changes the
+	// page address; that redirect can reach the server before the navigation
+	// policy sees it. While the window is on the identity provider (not on the
+	// access point's heavy portal page), the address is read now and then so
+	// the authorization code is taken before it is used.
+	var onIdP atomic.Bool
+	go func() {
+		ticker := time.NewTicker(800 * time.Millisecond)
+		defer ticker.Stop()
+		deadline := time.Now().Add(6 * time.Minute)
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			if time.Now().After(deadline) || !onIdP.Load() || pasteMode.Load() {
+				continue
+			}
+			evalCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			raw, err := page.EvalContext(evalCtx,
+				`(function(){ try { return location.href || ''; } catch (e) { return ''; } })()`)
+			cancel()
+			if err != nil {
+				continue
+			}
+			href, _ := raw.(string)
+			if href == "" {
+				continue
+			}
+			if accept(href) {
+				return
+			}
+		}
+	}()
+
 	activity := make(chan struct{}, 1)
 	noteActivity := func() {
 		select {
@@ -316,6 +365,10 @@ func (a *app) externalLogin(ctx context.Context, pointName, server, loginURL str
 	page.OnWillNavigate(func(e *mygo.NavigateEvent) {
 		noteActivity()
 		visited.add(hostOf(e.URL))
+		onIdP.Store(!strings.EqualFold(hostOf(e.URL), server))
+		if onIdP.Load() && strings.HasPrefix(e.URL, "https://") {
+			lastIdP.Store(e.URL)
+		}
 		logLine("登录页跳转 %s", loginPageForLog(e.URL))
 		if accept(e.URL) {
 			e.PreventDefault()
@@ -325,6 +378,10 @@ func (a *app) externalLogin(ctx context.Context, pointName, server, loginURL str
 	// sees it; catch that too.
 	page.OnDidNavigate(func(rawURL string) {
 		visited.add(hostOf(rawURL))
+		onIdP.Store(!strings.EqualFold(hostOf(rawURL), server))
+		if onIdP.Load() && strings.HasPrefix(rawURL, "https://") {
+			lastIdP.Store(rawURL)
+		}
 		logLine("登录页已到 %s", loginPageForLog(rawURL))
 		if accept(rawURL) {
 			return
@@ -573,6 +630,8 @@ func pasteLoginHTML(title, intro, loginURL string) string {
 		`<p>` + esc(intro) + `</p>` +
 		`<p>1. 在浏览器里完成登录；<br>2. 登录成功后地址栏会跳到 <code>https://&lt;服务器&gt;/passport/v1/auth/…</code>；<br>` +
 		`3. 把那一整条地址复制下来，粘贴到下面。</p>` +
+		`<p>如果地址已经跳走了：在浏览器里再打开一次上面的登录页（登录状态还在），` +
+		`地址栏会立刻重新出现带 ticket 的地址；或者在浏览器历史记录里搜索 <code>auth/cas</code> 找到它。</p>` +
 		`<p>登录页：<code>` + esc(loginURL) + `</code></p>` +
 		`<input id="cb" placeholder="粘贴 https://…/passport/v1/auth/… 开头的地址" spellcheck="false">` +
 		`<div id="err"></div></body></html>`

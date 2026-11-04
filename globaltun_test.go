@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/qy/easyconnect/internal/vpn"
 	"os"
 	"path/filepath"
 	"testing"
@@ -40,5 +41,22 @@ func TestMultitunPathReportsTried(t *testing.T) {
 	_, tried := multitunPath()
 	if tried == "" {
 		t.Fatal("找不到 helper 时应给出已尝试的路径")
+	}
+}
+
+// 记住的开关位置要落在正确的接入点上：优先上次那个，不在线才用第一个在线的。
+func TestPickResumePoint(t *testing.T) {
+	views := []vpn.View{
+		{ID: "a", State: vpn.StateOnline},
+		{ID: "b", State: vpn.StateOffline},
+	}
+	if got := pickResumePoint("a", views); got != "a" {
+		t.Errorf("首选在线项：got %q", got)
+	}
+	if got := pickResumePoint("b", views); got != "a" {
+		t.Errorf("记住的不在线时用第一个在线项：got %q", got)
+	}
+	if got := pickResumePoint("", nil); got != "" {
+		t.Errorf("没有在线项应返回空：got %q", got)
 	}
 }

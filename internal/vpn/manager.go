@@ -500,6 +500,11 @@ func (m *Manager) connect(id string, gen int) {
 			m.fail(id, gen, "扫码登录窗口不可用")
 			return
 		}
+	case model.AuthModeSSO:
+		// Single sign-on keeps no password here: the browser login saved
+		// the session, and the connector resumes it. When that session is
+		// gone the connector says so, which is more useful than a
+		// credential error.
 	case model.AuthModeAuto:
 		if strings.TrimSpace(creds.Login) == "" && creds.ExternalLogin == nil {
 			m.fail(id, gen, "自动识别需要密码或扫码登录窗口")
@@ -677,6 +682,28 @@ func (m *Manager) Disconnect(id string) {
 		}
 	}
 	m.changed()
+}
+
+// SaveSessionJSON stores a session obtained outside this process, such as the
+// cookies a browser holds after an interactive single sign-on.
+func (m *Manager) SaveSessionJSON(id string, data []byte) error {
+	m.mu.RLock()
+	dir := m.dataDir
+	m.mu.RUnlock()
+	if dir == "" {
+		return errors.New("数据目录还没有就绪")
+	}
+	if err := writeClientData(dir, id, data); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if ep := m.points[id]; ep != nil {
+		ep.aliveFails = 0
+		ep.aliveRetryAt = time.Time{}
+		ep.retryStep = 0
+	}
+	m.mu.Unlock()
+	return nil
 }
 
 // Logout forgets the saved authentication of a point: the next login starts
@@ -1143,6 +1170,12 @@ func (m *Manager) checkSessions() {
 			if !ep.cfg.MonitorEnabled() {
 				continue
 			}
+			// 单点登录的会话由浏览器产生，服务器的在线检查会把它当作
+			// 「另一个客户端接管」而作废，隧道随即变成 invalid SID。
+			// 这类接入点不做会话探测。
+			if model.AuthMode(ep.cfg.AuthMode) == model.AuthModeSSO {
+				continue
+			}
 			if ep.sess != nil {
 				if _, ok := ep.sess.(AliveProber); !ok {
 					continue
@@ -1171,6 +1204,15 @@ func (m *Manager) checkSessions() {
 // recorded: two real "session is not yours anymore" answers are needed before
 // the point is taken down, so a flaky link cannot drop a working tunnel.
 func (m *Manager) checkSession(id, name string, sess Session) {
+	// 单点登录的会话一旦被服务器的在线检查认作另一个客户端，隧道就废了。
+	// 这里统一拦住，手动「立即检测」也不会绕过。
+	m.mu.RLock()
+	if ep := m.points[id]; ep != nil && model.AuthMode(ep.cfg.AuthMode) == model.AuthModeSSO {
+		m.mu.RUnlock()
+		return
+	}
+	m.mu.RUnlock()
+
 	var status AliveStatus
 	var err error
 	if sess == nil {
@@ -1216,6 +1258,19 @@ func (m *Manager) checkSession(id, name string, sess Session) {
 		m.persistSession(id)
 		m.changed()
 	default:
+		// A session that came from a browser is not necessarily valid for the
+		// web "onlineInfo" endpoint, while the tunnel built from it works. Such
+		// a point is reported as unconfirmed and never torn down on this
+		// answer; only a real login can replace it, and that needs the browser.
+		if model.AuthMode(ep.cfg.AuthMode) == model.AuthModeSSO {
+			ep.aliveState = "无法确认"
+			ep.aliveErr = fmt.Sprintf("服务器未通过在线检查（code=%d），隧道不受影响", status.Code)
+			ep.aliveFails = 0
+			ep.aliveRetryAt = time.Time{}
+			m.mu.Unlock()
+			m.changed()
+			return
+		}
 		ep.aliveFails++
 		ep.aliveState = "已失效"
 		reason := fmt.Sprintf("服务器判定会话已不可用（code=%d %s）", status.Code, status.Message)
@@ -1228,7 +1283,9 @@ func (m *Manager) checkSession(id, name string, sess Session) {
 		} else {
 			ep.aliveRetryAt = time.Time{}
 		}
-		auto := m.settings.AutoReconnect && !m.closed
+		// 单点登录的重连需要用户在浏览器里操作，自动重连只会莫名弹出窗口。
+		auto := m.settings.AutoReconnect && !m.closed &&
+			model.AuthMode(ep.cfg.AuthMode) != model.AuthModeSSO
 		m.mu.Unlock()
 		m.logf("[%s] %s（第 %d 次）", name, reason, ep.aliveFails)
 		if final {

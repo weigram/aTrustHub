@@ -242,6 +242,9 @@ func (a *app) startGlobalTUN(id string) {
 		"-stop-file", stopPath,
 		"-gui-file", guiPath,
 		"-reload-file", filepath.Join(a.dir, "tun.reload"),
+		// 地址测试必须走真实隧道：TUN 栈会在本地完成握手，直连得到的
+		// 「可达 2ms」是假的。
+		"-probe", filepath.Join(a.dir, "tun.probe"),
 	}
 	privileged := true
 	if err := a.ensureHelperPrivilege(helper, args); err != nil {
@@ -470,16 +473,17 @@ func pidFileFresh(path string, maxAge time.Duration) bool {
 }
 
 func (a *app) persistTunState(on bool, id string) {
-	_, err := a.store.Update(func(cfg *model.Config) error {
+	if _, err := a.store.Update(func(cfg *model.Config) error {
 		cfg.Settings.TunEnabled = on
 		if on {
 			cfg.Settings.TunPointID = id
 		}
 		return nil
-	})
-	if err == nil {
-		a.cfg = a.store.Config()
+	}); err != nil {
+		return
 	}
+	// Update 只改内存，落盘要显式 Save，否则重启后记不住开关位置。
+	_ = a.saveConfig()
 }
 
 // lastLines returns the tail of a log file for the failure toast.
@@ -584,4 +588,56 @@ func (a *app) shutdownHelper(wait time.Duration) bool {
 func (a *app) stopTUNQuiet() {
 	// Keep quitting responsive: ask the helper to leave, don't wait long.
 	_ = a.shutdownHelper(2 * time.Second)
+}
+
+// probeTunnel asks the running helper to open one connection through the
+// tunnel. TUN completes the TCP handshake locally, so a plain dial reports
+// success in a couple of milliseconds even when nothing is reachable; only the
+// helper can tell the truth.
+func (a *app) probeTunnel(pointName, addr string, wait time.Duration) (bool, int64, string, bool) {
+	a.probeMu.Lock()
+	defer a.probeMu.Unlock()
+	reqPath := filepath.Join(a.dir, "tun.probe")
+	resPath := reqPath + ".result"
+	id := fmt.Sprintf("%d", time.Now().UnixNano())
+	_ = os.Remove(resPath)
+	if err := os.WriteFile(reqPath, []byte(id+"|"+pointName+"|"+addr), 0o600); err != nil {
+		return false, 0, "", false
+	}
+	deadline := time.Now().Add(wait)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(resPath)
+		if err == nil && len(data) > 0 {
+			var out struct {
+				ID    string `json:"id"`
+				OK    bool   `json:"ok"`
+				MS    int64  `json:"ms"`
+				Error string `json:"error"`
+			}
+			if json.Unmarshal(data, &out) == nil && out.ID == id {
+				_ = os.Remove(resPath)
+				return out.OK, out.MS, out.Error, true
+			}
+			time.Sleep(80 * time.Millisecond)
+			continue
+		}
+		time.Sleep(80 * time.Millisecond)
+	}
+	return false, 0, "", false
+}
+
+// pickResumePoint chooses which access point the remembered TUN should use:
+// the remembered one when it is online, otherwise the first online point.
+func pickResumePoint(preferred string, views []vpn.View) string {
+	for _, v := range views {
+		if v.ID == preferred && v.State == vpn.StateOnline {
+			return v.ID
+		}
+	}
+	for _, v := range views {
+		if v.State == vpn.StateOnline {
+			return v.ID
+		}
+	}
+	return ""
 }

@@ -31,7 +31,7 @@ const version = "0.1.0"
 // app is everything the window shows and the manager that does the work.
 // appBuild is shown in the footer and the startup log so an old running
 // instance is easy to tell apart from a freshly built one.
-const appBuild = "0.26.7"
+const appBuild = "0.26.8"
 
 type app struct {
 	win   *mygo.Window
@@ -59,6 +59,18 @@ type app struct {
 	// resumed for this point once it logs in, so the switch reflects intent.
 	tunWanted      bool
 	tunResumeTried bool
+	// tunResumeAt throttles restoring the remembered switch position, so a
+	// helper that cannot start is not retried on every tick.
+	tunResumeAt time.Time
+	// tunResumeFails stops the automatic restore after repeated failures; a
+	// fresh login or a switch flip clears it.
+	tunResumeFails int
+	// probeMu serialises tunnel probes: the helper answers one request file,
+	// and two parallel tests would overwrite each other's request.
+	probeMu sync.Mutex
+	// browserLoginMu keeps one browser login at a time: a second one would
+	// launch a browser on a profile the first one already holds.
+	browserLoginMu sync.Mutex
 	// loginPage is the page of the login window on screen, so the menu can open
 	// its developer tools.
 	loginPage   *mygo.Page
@@ -106,6 +118,13 @@ type app struct {
 	tab int
 	// appQuery filters the workbench.
 	appQuery string
+	// appSwitch holds one stable boolean per application for its switch:
+	// binding a widget to a local makes the click write to a dead address.
+	appSwitch map[string]*bool
+	// appFilter narrows the workbench to enabled or disabled applications:
+	// "all", "on" or "off". appFilterLabel is what the dropdown shows.
+	appFilter      string
+	appFilterLabel string
 	// appCollapsed remembers which access points' app groups are collapsed
 	// (true = collapsed). A point is expanded by default.
 	appCollapsed map[string]bool
@@ -138,7 +157,9 @@ type editorDraft struct {
 	socksPort     string
 	inPool        bool
 	autoConnect   bool
-	browserLogin  bool
+	// autoPick lets detection choose the auth mode: what a point saved by an
+	// older version (mode "auto") gets when it is opened.
+	autoPick      bool
 	monitor       bool
 	monitorEvery  string
 	secretStore   string
@@ -233,11 +254,14 @@ func newApp() (*app, error) {
 	}
 
 	a := &app{
-		store:    st,
-		dir:      dir,
-		bus:      vpn.NewLogBus(600),
-		loginSem: make(chan struct{}, 1),
-		icon:     loadAppIcon(),
+		store:          st,
+		dir:            dir,
+		bus:            vpn.NewLogBus(600),
+		loginSem:       make(chan struct{}, 1),
+		icon:           loadAppIcon(),
+		appSwitch:      map[string]*bool{},
+		appFilter:      "all",
+		appFilterLabel: "所有",
 	}
 	logPath := os.Getenv("EASYCONNECT_LOG")
 	if logPath == "" {
@@ -455,44 +479,74 @@ func (a *app) invalidate() {
 	a.maybeRefreshTUN()
 }
 
-// maybeResumeTUN re-opens global TUN once, at startup, for the remembered
-// point when it has logged in, so a remembered switch position actually
-// resumes. It never touches login itself.
+// maybeResumeTUN re-opens global TUN whenever the remembered switch position
+// is "on" and an access point is online again. The position is recorded when
+// the switch is flipped, so turning TUN off survives a restart and a new login,
+// while turning it on means the next login brings it back.
 func (a *app) maybeResumeTUN() {
-	if !a.tunWanted || a.tunOn || a.tunResumeTried {
+	if !a.tunWanted || a.tunOn || a.tunPending {
 		return
 	}
-	id := a.cfg.Settings.TunPointID
+	if time.Now().Before(a.tunResumeAt) {
+		return
+	}
+	if a.tunResumeFails >= 3 {
+		return
+	}
+	id := pickResumePoint(a.cfg.Settings.TunPointID, a.mgr.Views())
 	if id == "" {
+		// 没有在线接入点：把失败计数清零，等下一次登录再试。
+		a.tunResumeFails = 0
 		return
 	}
-	v, ok := a.mgr.View(id)
-	if !ok || v.State != vpn.StateOnline {
-		return
-	}
-	a.tunResumeTried = true
+	a.tunResumeAt = time.Now().Add(30 * time.Second)
+	a.tunResumeFails++
+	a.tunLogf("按上次的状态恢复全局 TUN（%s，第 %d 次尝试）", id, a.tunResumeFails)
 	go a.startGlobalTUN(id)
 }
 
 // credentials reads what the manager needs for one login.
+//
+// The flow follows the configured auth mode, so the same "登录" button
+// works everywhere: the password mode signs in by itself, WeCom opens the
+// QR popup, and third-party SSO resumes the session the browser login
+// saved.
 func (a *app) credentials(id string) (vpn.Credentials, error) {
 	point := a.cfg.Find(id)
 	mode := model.AuthModePassword
-	if point != nil {
+	if point != nil && point.AuthMode != "" {
 		mode = model.AuthMode(point.AuthMode)
 	}
 	var external func(context.Context, string) (string, error)
 	if point != nil && (mode == model.AuthModeAuto || mode == model.AuthModeWeCom) {
-		name, server, inBrowser := point.Name, point.Server, point.LoginInBrowser
+		name, server := point.Name, point.Server
+		// WeCom always uses the app's own popup now. Only a legacy "auto"
+		// point keeps the old "hand over to the system browser" switch.
+		inBrowser := mode == model.AuthModeAuto && point.LoginInBrowser
 		external = func(ctx context.Context, loginURL string) (string, error) {
 			return a.externalLogin(ctx, name, server, loginURL, inBrowser)
 		}
 	}
-	if mode == model.AuthModeWeCom {
+	switch mode {
+	case model.AuthModeWeCom:
 		if external == nil {
 			return vpn.Credentials{}, vpn.ErrNoCredentials
 		}
 		return vpn.Credentials{ExternalLogin: external}, nil
+	case model.AuthModeSSO:
+		// 这里没有账号密码：由真正的浏览器走完单点登录并交回授权码，
+		// 登录本身仍由客户端完成，隧道才用得上它自己的设备号与签名。
+		point := a.cfg.Find(id)
+		if browserExecutable() != "" {
+			return vpn.Credentials{ExternalLogin: func(cbCtx context.Context, loginURL string) (string, error) {
+				return a.cdpLoginCallback(cbCtx, point, loginURL)
+			}}, nil
+		}
+		// 没有 Chromium 时退回应用内置窗口，走同一条单点登录。
+		if external != nil {
+			return vpn.Credentials{ExternalLogin: external}, nil
+		}
+		return vpn.Credentials{}, nil
 	}
 
 	cred, err := a.store.Password(id)

@@ -132,17 +132,32 @@ func (a *app) appsSection(c *ui.Context) {
 	query := strings.ToLower(strings.TrimSpace(a.appQuery))
 	shown := make([]appEntry, 0, len(all))
 	for _, entry := range all {
-		if query == "" || appMatches(entry, query) {
-			shown = append(shown, entry)
+		if query != "" && !appMatches(entry, query) {
+			continue
 		}
+		switch a.appFilter {
+		case "on":
+			if !a.appEnabled(entry.PointID, entry.App.ID) {
+				continue
+			}
+		case "off":
+			if a.appEnabled(entry.PointID, entry.App.ID) {
+				continue
+			}
+		}
+		shown = append(shown, entry)
 	}
 
 	ui.Row(c).AlignItems(ui.Center).Gap(10).Children(func() {
 		ui.Text(c, "应用中心").FontSize(14).Bold()
 		ui.Text(c, fmt.Sprintf("%d 个", len(all))).FontSize(12).TextColor(t.TextMuted)
 		ui.Row(c).Grow(1)
+		// 只看已启用 / 未启用的应用，排查时不用在 158 个里翻。
+		ui.Select(c, &a.appFilterLabel, []string{"所有", "已启用", "未启用"}).
+			Label("过滤应用").Width(120)
+		a.appFilter = appFilterValue(a.appFilterLabel)
 		ui.SearchField(c, &a.appQuery).Placeholder("搜索应用名称、地址或标签").
-			Label("搜索应用").Width(280)
+			Label("搜索应用").Width(240)
 	})
 
 	scroll := ui.Scroll(c).Grow(1).MinHeight(0)
@@ -178,21 +193,33 @@ func (a *app) appsSection(c *ui.Context) {
 				collapsed := a.appCollapsed[pid]
 				ui.Column(c).Gap(8).Children(func() {
 					// Clickable header to expand/collapse this point's group.
-					header := ui.Row(c).Gap(8).AlignItems(ui.Center).Padding(6, 8).
+					header := ui.Row(c).Gap(8).AlignItems(ui.Center).Justify(ui.SpaceBetween).Padding(6, 8).
 						Radius(8).Background(t.Surface).Border(1, t.Border)
 					header.OnClick(func() {
 						a.appCollapsed[pid] = !collapsed
 						a.invalidate()
 					})
+					// 左边的名字与数量贴在一起，右边单独一组按钮。
 					header.Children(func() {
-						arrow := "▸"
-						if !collapsed {
-							arrow = "▾"
-						}
-						ui.Text(c, arrow).FontSize(12).TextColor(t.TextMuted)
-						ui.Text(c, names[pid]).FontSize(13).Bold()
-						ui.Text(c, fmt.Sprintf("%d 个应用", len(entries))).
-							FontSize(11).TextColor(t.TextMuted)
+						ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+							arrow := "▸"
+							if !collapsed {
+								arrow = "▾"
+							}
+							ui.Text(c, arrow).FontSize(12).TextColor(t.TextMuted)
+							ui.Text(c, names[pid]).FontSize(13).Bold()
+							ui.Text(c, fmt.Sprintf("%d 个应用", len(entries))).
+								FontSize(11).TextColor(t.TextMuted)
+						})
+						// 该接入点的全部应用一次启停，靠右放，不必展开。
+						ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+							if ui.Button(c, "启用所有").Label("启用所有 " + names[pid]).Clicked() {
+								a.setAllAppsEnabled(pid, true)
+							}
+							if ui.Button(c, "停用所有").Label("停用所有 " + names[pid]).Clicked() {
+								a.setAllAppsEnabled(pid, false)
+							}
+						})
 					})
 					if !collapsed {
 						for _, entry := range entries {
@@ -259,12 +286,22 @@ func (a *app) appCard(c *ui.Context, entry appEntry) {
 			// IP range clash with the local network or another point.
 			ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
 				ui.Text(c, "隧道代理").FontSize(11).TextColor(t.TextMuted)
+				// 开关必须绑定到堆上的稳定变量：绑局部变量时点击写回的是
+				// 已经失效的地址，状态既不会保存也不会还原。
+				key := entry.PointID + "/" + app.ID
 				on := a.appEnabled(entry.PointID, app.ID)
-				state := on
-				ui.Switch(c, &state).Label("隧道代理 " + app.Name)
-				if state != on {
-					a.setAppEnabled(entry.PointID, app.ID, state)
+				sw, ok := a.appSwitch[key]
+				if !ok {
+					v := on
+					sw = &v
+					if a.appSwitch == nil {
+						a.appSwitch = map[string]*bool{}
+					}
+					a.appSwitch[key] = sw
 				}
+				ui.Switch(c, sw).Label("隧道代理 " + app.Name).OnChange(func() {
+					a.setAppEnabled(entry.PointID, app.ID, *sw)
+				})
 			})
 			if ui.Button(c, "详情").Label("应用详情 " + app.Name).Clicked() {
 				a.openAppDetail(entry)
@@ -460,9 +497,22 @@ func (a *app) testAppConnectivity(app vpn.App) {
 			}(i, j)
 		}
 		wg.Wait()
+		// 一个应用可能有多个地址：先给结论，再列明细，避免一条不通
+		// 让人以为整个应用不可用。
+		ok, total := 0, len(lines)
+		for _, line := range lines {
+			if strings.HasPrefix(line, "✅") {
+				ok++
+			}
+		}
+		summary := fmt.Sprintf("该应用可用：%d/%d 个地址可达", ok, total)
+		if ok == 0 {
+			summary = fmt.Sprintf("该应用当前不可用：%d 个地址都不可达", total)
+		}
+		body := summary + "\n" + strings.Join(lines, "\n")
 		a.win.Update(func() {
 			a.appTesting = false
-			a.appTestMsg = strings.Join(lines, "\n")
+			a.appTestMsg = body
 		})
 	}()
 }
@@ -472,6 +522,25 @@ func (a *app) testAppConnectivity(app vpn.App) {
 func (a *app) probeHostText(id, host string, ports []int) string {
 	if len(ports) == 0 {
 		ports = []int{443, 80}
+	}
+	// 全局 TUN 接管时，本地的拨号在 TUN 栈里就完成了握手，测出来永远是
+	// 「可达 2ms」。这时让 helper 用真实隧道连一次。
+	if a.tunOn && hostInTun(a.tunPoints, id) {
+		if point := a.cfg.Find(id); point != nil {
+			for _, p := range ports {
+				addr := net.JoinHostPort(host, strconv.Itoa(p))
+				ok, ms, errText, answered := a.probeTunnel(point.Name, addr, 6*time.Second)
+				if !answered {
+					return fmt.Sprintf("⚠️ %s 无法通过隧道确认（helper 没有回应）", addr)
+				}
+				if ok {
+					return fmt.Sprintf("✅ %s 可达（%d ms，经隧道）", addr, ms)
+				}
+				if errText != "" {
+					return fmt.Sprintf("❌ %s 不可达（%s）", addr, errText)
+				}
+			}
+		}
 	}
 	type result struct {
 		port int
@@ -509,6 +578,9 @@ func (a *app) probeHostText(id, host string, ports []int) string {
 			return fmt.Sprintf("✅ %s:%d 可达（%d ms）", host, r.port, r.d.Milliseconds())
 		}
 		lastErr = r.err
+	}
+	if len(ports) == 1 {
+		return fmt.Sprintf("❌ %s:%d 不可达（%s）", host, ports[0], shortErr(lastErr))
 	}
 	return fmt.Sprintf("❌ %s 不可达（%s）", host, shortErr(lastErr))
 }
@@ -604,6 +676,10 @@ func (a *app) header(c *ui.Context) {
 					}
 				})
 				if a.tunSwitch != shown {
+					// 用户亲手拨动开关：把自动恢复的失败计数清掉，
+					// 让下一次登录仍按这次的选择还原。
+					a.tunResumeFails = 0
+					a.tunResumeAt = time.Time{}
 					a.tunPending = true
 					a.tunLogf("TUN开关点击: on=%v shown=%v", a.tunSwitch, shown)
 					if a.tunSwitch {
@@ -837,14 +913,21 @@ func (a *app) pointButtons(c *ui.Context, v vpn.View) {
 		if ui.Button(c, "断开").Label("断开 " + v.Name).Clicked() {
 			go a.mgr.Disconnect(v.ID)
 		}
-		if ui.Button(c, "退出登录").Label("退出登录 " + v.Name).Clicked() {
-			a.askLogout(v)
+		// Only the WeCom login keeps a session worth discarding by hand: it is
+		// the one where "退出登录" means "sign in as someone else next time".
+		if p := a.cfg.Find(v.ID); canLogout(p) {
+			if ui.Button(c, "退出登录").Label("退出登录 " + v.Name).Clicked() {
+				a.askLogout(v)
+			}
 		}
 	case vpn.StateConnecting:
 		if ui.Button(c, "取消").Label("取消 " + v.Name).Clicked() {
 			go a.mgr.Disconnect(v.ID)
 		}
 	default:
+		// One button, and the configured auth mode decides what it does:
+		// password logs in by itself, WeCom opens the QR popup, single
+		// sign-on needs the browser.
 		if ui.PrimaryButton(c, "登录").Label("登录 " + v.Name).Clicked() {
 			a.tunLogf("登录点击：%s（%s）", v.Name, v.ID)
 			a.mgr.Connect(v.ID)
@@ -1068,9 +1151,11 @@ func subtitleOf(v vpn.View) string {
 	parts := []string{}
 	switch model.AuthMode(v.AuthMode) {
 	case model.AuthModeAuto:
-		parts = append(parts, "自动识别")
+		parts = append(parts, "自动识别（旧）")
 	case model.AuthModeWeCom:
-		parts = append(parts, "扫码登录")
+		parts = append(parts, "企业微信弹窗登录")
+	case model.AuthModeSSO:
+		parts = append(parts, "单点登录（浏览器）")
 	default:
 		if v.Username != "" {
 			user := v.Username
@@ -1109,7 +1194,9 @@ func authModeFromLabel(label string) model.AuthMode {
 			return entry.Value
 		}
 	}
-	return model.AuthModeAuto
+	// The editor no longer offers "自动识别", so an unknown label falls back
+	// to the mode that needs the least explanation.
+	return model.AuthModePassword
 }
 
 func routingLabelStrings() []string {
@@ -1170,11 +1257,6 @@ func (a *app) editorView(c *ui.Context) {
 					a.detectEditor()
 				}
 			})
-			// Some SSO portals only finish their login in a real browser;
-			// this hands the page over instead of showing it in the app.
-			if d.authMode != string(model.AuthModePassword) {
-				ui.Checkbox(c, &d.browserLogin, "用系统浏览器登录（弹窗里登不进去时勾选）")
-			}
 			if d.detecting {
 				ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
 					ui.Spinner(c)
@@ -1192,29 +1274,27 @@ func (a *app) editorView(c *ui.Context) {
 				ui.TextInput(c, &d.address).
 					Placeholder("例如：https://vpn.example.com:443").Grow(1)
 			})
-			if d.authMode == string(model.AuthModeWeCom) {
+			switch d.authMode {
+			case string(model.AuthModeWeCom):
+				// 企业微信：登录域用来在服务器提供多个外部登录时挑一个。
 				ui.Field(c, "登录域（可选）", func() {
 					ui.TextInput(c, &d.domain).Placeholder("服务器有多个外部登录方式时用来区分").Width(240)
 				})
-			} else {
-				optional := d.authMode == string(model.AuthModeAuto)
+			case string(model.AuthModeSSO):
+				// 单点登录：账号密码在对方页面上完成，这里只说明流程。
+				ui.Text(c, "保存后点卡片上的「登录」会打开浏览器完成单点登录，"+
+					"登录成功后自动取回会话并连接。").
+					FontSize(11).TextColor(t.TextMuted)
+			default:
 				ui.Field(c, "用户名", func() {
-					in := ui.TextInput(c, &d.username)
-					if optional {
-						in.Placeholder("可选：填了就走账号密码")
-					} else {
-						in.Placeholder("登录 aTrust 的账号")
-					}
+					ui.TextInput(c, &d.username).Placeholder("登录 aTrust 的账号")
 				})
 				ui.Row(c).Gap(10).AlignItems(ui.End).Children(func() {
 					ui.Field(c, "密码", func() {
 						in := ui.TextInput(c, &d.cred).Password().Grow(1)
-						switch {
-						case d.hasPassword:
+						if d.hasPassword {
 							in.Placeholder("已保存，留空则沿用")
-						case optional:
-							in.Placeholder("可选：留空则扫码/单点登录")
-						default:
+						} else {
 							in.Placeholder("登录密码")
 						}
 					})
@@ -1377,6 +1457,13 @@ func (a *app) deleteView(c *ui.Context) {
 	}
 }
 
+// canLogout reports whether "退出登录" is offered for a point. Only the WeCom
+// login leaves a session worth discarding by hand; the other modes either keep
+// a password or a browser session the user manages elsewhere.
+func canLogout(p *model.AccessPoint) bool {
+	return p != nil && model.AuthMode(p.AuthMode) == model.AuthModeWeCom
+}
+
 // askLogout refuses while the global TUN owns the session, then opens the
 // confirmation: forgetting the authentication forces a new QR scan.
 func (a *app) askLogout(v vpn.View) {
@@ -1476,12 +1563,11 @@ func (a *app) openNewEditor() {
 	a.editor = editorDraft{
 		open:          true,
 		address:       "",
-		authMode:      string(model.AuthModeAuto),
-		authModeLabel: model.AuthModeAuto.Label(),
+		authMode:      string(model.AuthModePassword),
+		authModeLabel: model.AuthModePassword.Label(),
 		socksPort:     strconv.Itoa(a.cfg.NextSocksPort()),
 		inPool:        true,
 		autoConnect:   false,
-		browserLogin:  false,
 		monitor:       true,
 		monitorEvery:  "300",
 		secretStore:   secretStoreLabel(a.cfg.Settings.SecretStore),
@@ -1493,19 +1579,28 @@ func (a *app) openEditor(v vpn.View) {
 	if p == nil {
 		return
 	}
+	mode := model.AuthMode(p.AuthMode)
+	if mode == model.AuthModeAuto {
+		// "自动识别" is gone from the editor: show what the old point has
+		// actually been doing, so saving turns it into an explicit mode.
+		if a.hasPassword(p.ID) {
+			mode = model.AuthModePassword
+		} else {
+			mode = model.AuthModeWeCom
+		}
+	}
 	a.editor = editorDraft{
 		open:          true,
 		editingID:     p.ID,
 		name:          p.Name,
 		address:       model.FormatAccessAddress(p.Server, p.Port),
 		username:      p.Username,
-		authMode:      p.AuthMode,
-		authModeLabel: model.AuthMode(p.AuthMode).Label(),
+		authMode:      string(mode),
+		authModeLabel: mode.Label(),
 		domain:        p.LoginDomain,
 		socksPort:     strconv.Itoa(p.SocksPort),
 		inPool:        p.InPool,
 		autoConnect:   p.AutoConnect,
-		browserLogin:  p.LoginInBrowser,
 		monitor:       p.MonitorEnabled(),
 		monitorEvery:  strconv.Itoa(p.MonitorIntervalSeconds()),
 		secretStore:   secretStoreLabel(a.cfg.Settings.SecretStore),
@@ -1513,6 +1608,15 @@ func (a *app) openEditor(v vpn.View) {
 		detected:      nil,
 	}
 	a.editor.hasTOTP = a.hasTOTP(p.ID)
+	// A point saved before the mode was a choice gets the mode the server
+	// actually offers, picked by detection instead of a "detect yourself"
+	// dropdown entry.
+	if strings.TrimSpace(p.AuthMode) == "" || model.AuthMode(p.AuthMode) == model.AuthModeAuto {
+		a.editor.autoPick = true
+	}
+	if a.editor.autoPick {
+		a.detectEditor()
+	}
 }
 
 func (a *app) saveEditor() {
@@ -1536,8 +1640,9 @@ func (a *app) saveEditor() {
 		mode = d.authMode
 	}
 	switch model.AuthMode(mode) {
-	case model.AuthModeWeCom:
-		// The QR login has no username or stored password.
+	case model.AuthModeWeCom, model.AuthModeSSO:
+		// Neither needs a username or a stored password: WeCom shows a QR
+		// code, single sign-on runs on the portal's own page.
 	case model.AuthModeAuto:
 		if strings.TrimSpace(d.cred) != "" && strings.TrimSpace(d.username) == "" {
 			d.err = "填了密码就要填用户名"
@@ -1557,18 +1662,24 @@ func (a *app) saveEditor() {
 		d.err = "至少勾选统一入口，或填一个独立 SOCKS5 端口"
 		return
 	}
+	// Switching away from the password mode leaves no one to use a
+	// username: drop it so the card does not show an account that is never
+	// sent.
+	username := strings.TrimSpace(d.username)
+	if model.AuthMode(mode) != model.AuthModePassword && model.AuthMode(mode) != model.AuthModeAuto {
+		username = ""
+	}
 	p := model.AccessPoint{
 		ID:          d.editingID,
 		Name:        strings.TrimSpace(d.name),
 		Server:      server,
 		Port:        port,
-		Username:    strings.TrimSpace(d.username),
+		Username:    username,
 		AuthMode:    mode,
 		LoginDomain: strings.TrimSpace(d.domain),
 		SocksPort:   socksPort,
 		InPool:      d.inPool,
-		AutoConnect:    d.autoConnect,
-		LoginInBrowser: d.browserLogin,
+		AutoConnect: d.autoConnect,
 	}
 	monitor := d.monitor
 	p.Monitor = &monitor
@@ -1644,7 +1755,10 @@ func (a *app) saveEditor() {
 			d.err = "保存密码存储方式失败：" + err.Error()
 			return
 		}
-		a.cfg = a.store.Config()
+		if err := a.saveConfig(); err != nil {
+			d.err = "保存密码存储方式失败：" + err.Error()
+			return
+		}
 		a.toast = "已保存「" + p.Name + "」，密码存储方式改为「" + d.secretStore + "」，重启后生效"
 		d.open = false
 		return
@@ -1704,7 +1818,23 @@ func (a *app) detectEditor() {
 				d.detectErr = "服务器没有返回可用的认证方式"
 				return
 			}
-			if mode == string(model.AuthModeAuto) && !hasExternal && hasPassword && !d.hasPassword && strings.TrimSpace(d.cred) == "" {
+			if d.autoPick {
+				// 企业微信优先（有扫码就用扫码），其次是单点登录，
+				// 最后才是账号密码：这正是服务器给出的顺序所意味的。
+				picked := model.AuthModePassword
+				switch {
+				case hasWeCom(methods):
+					picked = model.AuthModeWeCom
+				case hasSSO(methods):
+					picked = model.AuthModeSSO
+				}
+				d.authMode = string(picked)
+				d.authModeLabel = picked.Label()
+				d.autoPick = false
+			}
+			// 账号密码模式下，服务器只提供密码登录而表单还没填密码时，
+			// 直接把下一步说清楚，省得保存后才报错。
+			if mode == string(model.AuthModePassword) && !hasExternal && hasPassword && !d.hasPassword && strings.TrimSpace(d.cred) == "" {
 				d.detectErr = "服务器只支持账号密码，请填写用户名和密码"
 			}
 		}
@@ -1884,4 +2014,50 @@ func secretStoreFromLabel(label string) string {
 		return model.SecretStoreKeychain
 	}
 	return model.SecretStoreFile
+}
+
+// hasWeCom reports whether the server offers the WeCom QR login, which the
+// app completes in its own popup.
+func hasWeCom(methods []vpn.AuthMethod) bool {
+	for _, m := range methods {
+		if m.Type == "auth/qywechat" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasSSO reports whether the server offers a single sign-on that only finishes
+// in a real browser.
+func hasSSO(methods []vpn.AuthMethod) bool {
+	for _, m := range methods {
+		switch m.Type {
+		case "auth/cas", "auth/httpsOauth2":
+			return true
+		}
+	}
+	return false
+}
+
+// hostInTun reports whether a point is one the running helper serves. The
+// snapshot is a comma-joined list of point IDs.
+func hostInTun(points, id string) bool {
+	for _, p := range strings.Split(points, ",") {
+		if strings.TrimSpace(p) == id {
+			return true
+		}
+	}
+	return false
+}
+
+// appFilterValue maps the dropdown label to the filter used by the list.
+func appFilterValue(label string) string {
+	switch label {
+	case "已启用":
+		return "on"
+	case "未启用":
+		return "off"
+	default:
+		return "all"
+	}
 }

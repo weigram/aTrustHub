@@ -79,7 +79,7 @@ func connectZJU(ctx context.Context, opts ZJUOptions, point model.AccessPoint, c
 		return nil, err
 	}
 
-	loginMethod, err := zjuLoginMethod(ctx, point, creds)
+	loginMethod, err := zjuLoginMethod(ctx, point, creds, len(clientData) > 0)
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +154,7 @@ func connectZJU(ctx context.Context, opts ZJUOptions, point model.AccessPoint, c
 		return nil, ctx.Err()
 	case res := <-done:
 		if res.err != nil {
-			return nil, res.err
+			return nil, loginErrorFor(point, res.err)
 		}
 		authData = res.data
 	}

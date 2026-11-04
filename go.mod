@@ -4,6 +4,7 @@ go 1.27.3
 
 require (
 	github.com/egoist/mygo v0.7.3
+	github.com/gorilla/websocket v1.5.3
 	github.com/miekg/dns v1.1.72
 	github.com/mythologyli/zju-connect v1.3.1
 )

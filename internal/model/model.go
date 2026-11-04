@@ -67,26 +67,33 @@ func (r Routing) Valid() bool {
 type AuthMode string
 
 const (
-	// AuthModeAuto asks the server which methods it offers, then uses a
-	// stored password if there is one and auth/psw is available; otherwise
-	// it uses the first WeCom/enterprise external login.
+	// AuthModeAuto is the old "let the server decide" mode. The editor no
+	// longer offers it; it stays so points saved by an older version keep
+	// logging in the way they used to.
 	AuthModeAuto AuthMode = "auto"
 	// AuthModePassword is aTrust's username and password login
-	// (auth/psw), optionally with a TOTP secret.
+	// (auth/psw), optionally with a TOTP secret. It logs in by itself.
 	AuthModePassword AuthMode = "psw"
 	// AuthModeWeCom is an external login, such as the WeCom QR code the
-	// official client shows (auth/httpsOauth2 or auth/cas).
+	// official client shows (auth/httpsOauth2 or auth/qywechat). It is
+	// completed in the app's own popup.
 	AuthModeWeCom AuthMode = "wecom"
+	// AuthModeSSO is a third-party single sign-on portal (auth/cas and
+	// friends) that only finishes in a real browser; the session the browser
+	// leaves behind is what the tunnel resumes.
+	AuthModeSSO AuthMode = "sso"
 )
 
-// AuthModeLabels are the modes as the UI shows them.
+// AuthModeLabels are the modes the editor offers, in display order.
+// AuthModeAuto is deliberately absent: the login flow now follows the
+// configuration instead of a "detect it yourself" choice.
 var AuthModeLabels = []struct {
 	Value AuthMode
 	Label string
 }{
-	{AuthModeAuto, "自动识别"},
 	{AuthModePassword, "账号密码"},
-	{AuthModeWeCom, "企业微信 / 单点登录"},
+	{AuthModeWeCom, "企业微信"},
+	{AuthModeSSO, "单点登录"},
 }
 
 // Label returns the Chinese name of the mode.
@@ -96,12 +103,19 @@ func (m AuthMode) Label() string {
 			return entry.Label
 		}
 	}
+	if m == AuthModeAuto {
+		// Legacy value: still shown for points saved before the mode was
+		// dropped from the editor.
+		return "自动识别（旧）"
+	}
 	return string(m)
 }
 
-// Valid reports whether m is one of the modes.
+// Valid reports whether m is a mode this version understands. AuthModeAuto
+// stays valid so an old configuration is not rewritten behind the user's
+// back; the editor simply no longer offers it.
 func (m AuthMode) Valid() bool {
-	return m == AuthModeAuto || m == AuthModePassword || m == AuthModeWeCom
+	return m == AuthModeAuto || m == AuthModePassword || m == AuthModeWeCom || m == AuthModeSSO
 }
 
 // AccessPoint is one aTrust server the app logs in to. Its cred and
@@ -112,7 +126,8 @@ type AccessPoint struct {
 	Server   string `json:"server"`
 	Port     int    `json:"port"`
 	Username string `json:"username"`
-	// AuthMode is "psw" or "wecom"; empty means "psw".
+	// AuthMode is "psw", "wecom" or "sso"; empty means "psw". The old
+	// "auto" value is still accepted but no longer offered.
 	AuthMode    string `json:"authMode,omitempty"`
 	LoginDomain string `json:"loginDomain,omitempty"`
 	// SocksPort is the SOCKS5 port this access point serves on its own;
@@ -305,7 +320,9 @@ func (p *AccessPoint) Normalize() {
 	p.Server = CleanServer(p.Server)
 	p.Username = strings.TrimSpace(p.Username)
 	if p.AuthMode == "" || !AuthMode(p.AuthMode).Valid() {
-		p.AuthMode = string(AuthModeAuto)
+		// Empty has always meant "账号密码"; keep that reading now that
+		// "自动识别" is gone from the editor.
+		p.AuthMode = string(AuthModePassword)
 	}
 	p.LoginDomain = strings.TrimSpace(p.LoginDomain)
 	if p.LoginDomain == "" {
@@ -440,10 +457,13 @@ func (p *AccessPoint) Validate() error {
 	}
 	switch AuthMode(p.AuthMode) {
 	case AuthModeAuto:
-		// The server decides; a stored password makes auth/psw the first
-		// choice, otherwise an external login is used.
+		// Legacy: the server decides; a stored password makes auth/psw the
+		// first choice, otherwise an external login is used.
 	case AuthModeWeCom:
 		// The QR login has no username; the server tells us who it is.
+	case AuthModeSSO:
+		// Single sign-on happens on the portal's own page, so the client
+		// needs neither a username nor a password.
 	default:
 		if p.Username == "" {
 			return errors.New("用户名不能为空")

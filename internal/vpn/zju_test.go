@@ -1,6 +1,8 @@
 package vpn
 
 import (
+	"net/url"
+	"errors"
 	"context"
 	"os"
 	"path/filepath"
@@ -147,7 +149,7 @@ func TestExternalLoginToClosedPortFails(t *testing.T) {
 	}, Credentials{ExternalLogin: func(context.Context, string) (string, error) {
 		called = true
 		return "", nil
-	}})
+	}}, false)
 	if err == nil {
 		t.Fatal("external login to a closed port succeeded")
 	}
@@ -263,5 +265,43 @@ func TestReadResourceDump(t *testing.T) {
 	got, err := readResourceDump(dir, "p1")
 	if err != nil || string(got) != string(want) {
 		t.Fatalf("got=%q err=%v", got, err)
+	}
+}
+
+// 单点登录：浏览器只交授权码，登录仍由客户端自己完成；没有浏览器时报错。
+func TestSSOLoginMethod(t *testing.T) {
+	point := model.AccessPoint{ID: "sso", Server: "127.0.0.1", Port: 1, AuthMode: string(model.AuthModeSSO)}
+	creds := Credentials{ExternalLogin: func(context.Context, string) (string, error) {
+		return "", errors.New("浏览器不会真的打开")
+	}}
+	if _, err := zjuLoginMethod(context.Background(), point, creds, false); err == nil {
+		t.Fatal("浏览器取不到票时应当报错")
+	}
+	if _, err := zjuLoginMethod(context.Background(), point, Credentials{}, false); err == nil {
+		t.Fatal("没有浏览器时应当报错")
+	}
+}
+
+// 门户快捷登录页把票放在 data 参数里，必须能解析出来。
+func TestTicketFromShortcut(t *testing.T) {
+	raw := "https://zeroportal.cnyeig.net:8888/portal/shortcut.html?source=auth_cas&username=u" +
+		"&data=%7B%22ticket%22%3A%22t1_t2%22%2C%22env%22%3A%7B%22need%22%3Atrue%7D%7D"
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ticketFromShortcut(u); got != "t1_t2" {
+		t.Fatalf("ticket = %q", got)
+	}
+	if got := ticketFromShortcut(&url.URL{}); got != "" {
+		t.Fatalf("空地址应当返回空，得到 %q", got)
+	}
+	method, err := loginMethodFromCallback(auth.AuthInfo{AuthType: "auth/cas", LoginDomain: "cas09519"}, raw, "zeroportal.cnyeig.net")
+	if err != nil {
+		t.Fatalf("登录方式解析失败：%v", err)
+	}
+	cas, ok := method.(auth.CASLogin)
+	if !ok || cas.Ticket != "t1_t2" {
+		t.Fatalf("method = %#v", method)
 	}
 }

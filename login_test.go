@@ -117,17 +117,70 @@ func TestAutoCredentialsNeedNoPassword(t *testing.T) {
 	}
 }
 
-func TestSaveAutoEditor(t *testing.T) {
+// 自动识别 is no longer offered; a new access point starts as 账号密码.
+// The old "auto" value keeps working, which the test above covers.
+func TestSaveDefaultEditorIsPassword(t *testing.T) {
 	a := testApp(t)
 	a.openNewEditor()
+	if got := a.editor.authModeLabel; got != model.AuthModePassword.Label() {
+		t.Fatalf("default auth mode label = %q", got)
+	}
 	a.editor.address = "https://vpn.example.edu.cn"
+	a.editor.username = "alice"
+	a.editor.cred = "pw-for-test"
 	a.saveEditor()
 	if a.editor.err != "" {
 		t.Fatalf("save: %s", a.editor.err)
 	}
 	p := a.store.Config().Points[0]
-	if p.AuthMode != string(model.AuthModeAuto) {
+	if p.AuthMode != string(model.AuthModePassword) {
 		t.Errorf("auth mode = %q", p.AuthMode)
+	}
+}
+
+func TestSaveSSOEditor(t *testing.T) {
+	a := testApp(t)
+	a.openNewEditor()
+	a.editor.address = "https://vpn.example.edu.cn"
+	a.editor.authModeLabel = model.AuthModeSSO.Label()
+	a.saveEditor()
+	if a.editor.err != "" {
+		t.Fatalf("save: %s", a.editor.err)
+	}
+	p := a.store.Config().Points[0]
+	if p.AuthMode != string(model.AuthModeSSO) {
+		t.Errorf("auth mode = %q", p.AuthMode)
+	}
+	if p.Username != "" {
+		t.Errorf("username = %q", p.Username)
+	}
+}
+
+// 单点登录 has no password to read: the browser login saved the session.
+func TestSSOCredentialsNeedNoPassword(t *testing.T) {
+	a := testApp(t)
+	var id string
+	if _, err := a.store.Update(func(cfg *model.Config) error {
+		p := cfg.Add(model.AccessPoint{
+			Name: "单点网关", Server: "vpn.example.edu.cn",
+			AuthMode: string(model.AuthModeSSO), InPool: true,
+		})
+		id = p.ID
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a.cfg = a.store.Config()
+	creds, err := a.credentials(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 单点登录不该带账号密码：由浏览器交回授权码，客户端再自己登录。
+	if creds.Login != "" || creds.TOTP != "" {
+		t.Errorf("sso credentials = %+v", creds)
+	}
+	if browserExecutable() != "" && creds.ExternalLogin == nil {
+		t.Errorf("有浏览器时应当提供取票入口，creds = %+v", creds)
 	}
 }
 
