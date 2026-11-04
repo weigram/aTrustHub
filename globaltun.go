@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -16,16 +17,35 @@ import (
 	"github.com/qy/easyconnect/internal/vpn"
 )
 
-// multitunPath is the bundled multi-point TUN helper.
-func multitunPath() string {
+// multitunPath is the bundled multi-point TUN helper. It is looked up in a
+// few places, because the app works whether it runs from the .app bundle, from
+// a development build directory, or from a copy the user moved elsewhere.
+func multitunPath() (path, tried string) {
 	name := "zju-connect-multitun" + helperSuffix
+	var candidates []string
 	if dir, err := mygo.App.Path(mygo.PathResources); err == nil && dir != "" {
-		p := filepath.Join(dir, name)
-		if _, err := os.Stat(p); err == nil {
-			return p
+		candidates = append(candidates, filepath.Join(dir, name))
+	}
+	// Next to the executable: the bundle layout on macOS and the install
+	// directory on Windows both keep it there.
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(exeDir, name),
+			filepath.Join(exeDir, "Resources", name),
+			filepath.Join(exeDir, "..", "Resources", name),
+		)
+	}
+	candidates = append(candidates,
+		filepath.Join("resources", name),
+		filepath.Join("resources", runtime.GOOS+"-"+runtime.GOARCH, name),
+	)
+	for _, c := range candidates {
+		if st, err := os.Stat(c); err == nil && !st.IsDir() {
+			return c, ""
 		}
 	}
-	return filepath.Join("resources", name)
+	return filepath.Join("resources", name), strings.Join(candidates, " ｜ ")
 }
 
 func shQuote(s string) string {
@@ -163,10 +183,10 @@ func (a *app) startGlobalTUN(id string) {
 		a.tunLogf("startGlobalTUN: 无在线接入点")
 		return
 	}
-	helper := multitunPath()
+	helper, tried := multitunPath()
 	if _, err := os.Stat(helper); err != nil {
 		a.toast = "找不到 TUN 组件：" + helper
-		a.tunLogf("startGlobalTUN: 找不到 helper %s", helper)
+		a.tunLogf("startGlobalTUN: 找不到 helper，已尝试：%s", tried)
 		return
 	}
 	_ = os.Chmod(helper, 0o755)

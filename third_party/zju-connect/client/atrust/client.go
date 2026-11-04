@@ -264,6 +264,37 @@ type OnlineStatus struct {
 	Message  string
 }
 
+// CheckSavedOnline probes a saved session without logging in: it is what the
+// GUI uses while a helper process owns the only live tunnel, so the user can
+// still ask "is this login still mine?".
+func CheckSavedOnline(server string, port int, clientData []byte) (OnlineStatus, error) {
+	var cd auth.ClientAuthData
+	if err := json.Unmarshal(clientData, &cd); err != nil {
+		return OnlineStatus{}, fmt.Errorf("会话文件无法解析：%w", err)
+	}
+	if len(cd.Cookies) == 0 {
+		return OnlineStatus{}, errors.New("会话文件里没有 cookie")
+	}
+	under, err := underlay.New(underlay.Options{AutoDetect: true})
+	if err != nil {
+		return OnlineStatus{}, fmt.Errorf("创建底层拨号器：%w", err)
+	}
+	defer func() { _ = under.Close() }()
+
+	host := server
+	if port != 0 && port != 443 {
+		host = fmt.Sprintf("%s:%d", server, port)
+	}
+	sess := auth.NewSession(host, nil, under.DialContext)
+	sess.RestoreCookies(cd.Cookies)
+	username, code, message, err := sess.OnlineProbe()
+	status := OnlineStatus{Username: username, Code: code, Message: message}
+	if err != nil {
+		return status, err
+	}
+	return status, nil
+}
+
 // CheckOnline asks the portal whether this session is still the active one.
 // When another client logs in with the same account the server takes the
 // session over, and the only way to notice is to ask.

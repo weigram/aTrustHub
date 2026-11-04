@@ -11,11 +11,15 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	atrustclient "github.com/mythologyli/zju-connect/client/atrust"
 
 	"github.com/qy/easyconnect/internal/model"
 	"github.com/qy/easyconnect/internal/proxy"
@@ -150,6 +154,9 @@ type Manager struct {
 
 	rr atomic.Uint64
 
+	// dataDir is where saved sessions live, used to probe a login whose
+	// tunnel is owned by the TUN helper.
+	dataDir string
 	healthStop chan struct{}
 	// monitorStop ends the session validity loop.
 	monitorStop chan struct{}
@@ -187,6 +194,11 @@ type endpoint struct {
 	aliveState string
 	aliveErr   string
 	aliveFails int
+	// aliveRetryAt schedules an early recheck after one bad answer, so a
+	// single hiccup does not wait out the whole interval.
+	aliveRetryAt time.Time
+	// retryStep counts login retries after the session was taken over.
+	retryStep int
 }
 
 // NewManager returns a manager that uses connector to log in and creds to
@@ -206,6 +218,13 @@ func NewManager(connector Connector, creds CredentialFunc, bus *LogBus, notify f
 	go m.healthLoop()
 	go m.monitorLoop()
 	return m
+}
+
+// SetDataDir tells the manager where session files are kept.
+func (m *Manager) SetDataDir(dir string) {
+	m.mu.Lock()
+	m.dataDir = dir
+	m.mu.Unlock()
 }
 
 func (m *Manager) changed() {
@@ -542,6 +561,8 @@ func (m *Manager) connect(id string, gen int) {
 	cur.probeFails = 0
 	// A fresh login starts the validity report from scratch.
 	cur.aliveFails = 0
+	cur.aliveRetryAt = time.Time{}
+	cur.retryStep = 0
 	cur.aliveAt = time.Time{}
 	cur.aliveState = ""
 	cur.aliveErr = ""
@@ -1082,16 +1103,24 @@ func (m *Manager) checkSessions() {
 	if !m.closed {
 		for _, id := range m.order {
 			ep := m.points[id]
-			if ep == nil || ep.state != StateOnline || ep.sess == nil {
+			if ep == nil || ep.state != StateOnline {
 				continue
 			}
 			if !ep.cfg.MonitorEnabled() {
 				continue
 			}
-			if _, ok := ep.sess.(AliveProber); !ok {
+			if ep.sess != nil {
+				if _, ok := ep.sess.(AliveProber); !ok {
+					continue
+				}
+			} else if !ep.tunServed {
 				continue
 			}
-			if !ep.aliveAt.IsZero() && now.Sub(ep.aliveAt) < time.Duration(ep.cfg.MonitorIntervalSeconds())*time.Second {
+			if !ep.aliveRetryAt.IsZero() && now.Before(ep.aliveRetryAt) {
+				continue
+			}
+			if ep.aliveRetryAt.IsZero() && !ep.aliveAt.IsZero() &&
+				now.Sub(ep.aliveAt) < time.Duration(ep.cfg.MonitorIntervalSeconds())*time.Second {
 				continue
 			}
 			jobs = append(jobs, job{id: id, name: ep.cfg.Name, sess: ep.sess})
@@ -1108,17 +1137,27 @@ func (m *Manager) checkSessions() {
 // recorded: two real "session is not yours anymore" answers are needed before
 // the point is taken down, so a flaky link cannot drop a working tunnel.
 func (m *Manager) checkSession(id, name string, sess Session) {
-	prober, ok := sess.(AliveProber)
-	if !ok {
-		return
+	var status AliveStatus
+	var err error
+	if sess == nil {
+		// The tunnel belongs to the TUN helper, so probe the saved session
+		// directly: the GUI has no client object of its own for this point.
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		status, err = m.probeSavedSession(ctx, id)
+		cancel()
+	} else {
+		prober, ok := sess.(AliveProber)
+		if !ok {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		status, err = prober.CheckAlive(ctx)
+		cancel()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	status, err := prober.CheckAlive(ctx)
-	cancel()
 
 	m.mu.Lock()
 	ep := m.points[id]
-	if ep == nil || ep.sess != sess || ep.state != StateOnline {
+	if ep == nil || ep.state != StateOnline || (sess != nil && ep.sess != sess) {
 		m.mu.Unlock()
 		return
 	}
@@ -1127,6 +1166,7 @@ func (m *Manager) checkSession(id, name string, sess Session) {
 	case err != nil:
 		ep.aliveState = "无法确认"
 		ep.aliveErr = err.Error()
+		ep.aliveRetryAt = time.Time{}
 		m.mu.Unlock()
 		m.logf("[%s] 会话检测暂时无法完成：%v", name, err)
 		m.changed()
@@ -1134,6 +1174,8 @@ func (m *Manager) checkSession(id, name string, sess Session) {
 		ep.aliveState = "有效"
 		ep.aliveErr = ""
 		ep.aliveFails = 0
+		ep.aliveRetryAt = time.Time{}
+		ep.retryStep = 0
 		m.mu.Unlock()
 		m.changed()
 	default:
@@ -1142,10 +1184,22 @@ func (m *Manager) checkSession(id, name string, sess Session) {
 		reason := fmt.Sprintf("服务器判定会话已不可用（code=%d %s）", status.Code, status.Message)
 		ep.aliveErr = reason
 		final := ep.aliveFails >= 2
+		if !final {
+			// Recheck soon instead of waiting a whole interval: the server may
+			// have answered mid-handover, and a false alarm must not linger.
+			ep.aliveRetryAt = time.Now().Add(10 * time.Second)
+		} else {
+			ep.aliveRetryAt = time.Time{}
+		}
+		auto := m.settings.AutoReconnect && !m.closed
 		m.mu.Unlock()
 		m.logf("[%s] %s（第 %d 次）", name, reason, ep.aliveFails)
 		if final {
-			m.markInvalid(id, "会话已被其它客户端顶掉："+reason)
+			msg := "会话已被其它客户端顶掉：" + reason
+			if auto {
+				msg += "（稍后自动重试登录）"
+			}
+			m.markInvalid(id, msg, auto)
 		} else {
 			m.changed()
 		}
@@ -1156,6 +1210,35 @@ func (m *Manager) checkSession(id, name string, sess Session) {
 // helper can resume the very same login.
 type SessionDataProvider interface {
 	ClientData() ([]byte, error)
+}
+
+// probeSavedSession asks the portal about a login while the TUN helper owns the
+// only tunnel, using the session file the helper resumes.
+func (m *Manager) probeSavedSession(ctx context.Context, id string) (AliveStatus, error) {
+	m.mu.RLock()
+	ep := m.points[id]
+	dir := m.dataDir
+	var server string
+	var port int
+	if ep != nil {
+		server, port = ep.cfg.Server, ep.cfg.Port
+	}
+	m.mu.RUnlock()
+	if ep == nil {
+		return AliveStatus{}, errors.New("接入点不存在")
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "atrust", id+".json"))
+	if err != nil {
+		return AliveStatus{}, fmt.Errorf("读取会话文件：%w", err)
+	}
+	online, err := atrustclient.CheckSavedOnline(server, port, data)
+	res := AliveStatus{
+		Username: online.Username,
+		Code:     online.Code,
+		Message:  online.Message,
+		Valid:    err == nil && online.Code == 0,
+	}
+	return res, err
 }
 
 // SetTunServed hands the tunnel of the given points over to the global TUN
@@ -1278,7 +1361,7 @@ func (m *Manager) PersistSessions(dir string) {
 func (m *Manager) CheckNow(id string) bool {
 	m.mu.RLock()
 	ep := m.points[id]
-	if ep == nil || ep.state != StateOnline || ep.sess == nil {
+	if ep == nil || ep.state != StateOnline || (ep.sess == nil && !ep.tunServed) {
 		m.mu.RUnlock()
 		return false
 	}
@@ -1290,7 +1373,7 @@ func (m *Manager) CheckNow(id string) bool {
 
 // markInvalid tears a session down and keeps the reason visible, instead of
 // letting the point look merely offline.
-func (m *Manager) markInvalid(id, msg string) {
+func (m *Manager) markInvalid(id, msg string, autoReconnect bool) {
 	var closes []closeLater
 	m.mu.Lock()
 	ep := m.points[id]
@@ -1315,6 +1398,39 @@ func (m *Manager) markInvalid(id, msg string) {
 	}
 	m.logf("[%s] %s", name, msg)
 	m.changed()
+	if autoReconnect {
+		m.retryLogin(id)
+	}
+}
+
+// loginRetryDelays is the backoff between automatic logins after the session
+// was taken over. Five attempts, then it stops and waits for the user.
+var loginRetryDelays = []time.Duration{
+	15 * time.Second, 30 * time.Second, time.Minute,
+	2 * time.Minute, 5 * time.Minute,
+}
+
+// retryLogin logs in again after a takeover, backing off so a failing server
+// is not hammered.
+func (m *Manager) retryLogin(id string) {
+	m.mu.Lock()
+	ep := m.points[id]
+	if ep == nil || m.closed {
+		m.mu.Unlock()
+		return
+	}
+	step := ep.retryStep
+	ep.retryStep++
+	name := ep.cfg.Name
+	m.mu.Unlock()
+	if step >= len(loginRetryDelays) {
+		m.logf("[%s] 已连续重试 %d 次仍未恢复，停止自动重连", name, len(loginRetryDelays))
+		return
+	}
+	delay := loginRetryDelays[step]
+	m.logf("[%s] 会话失效，%s 后自动重新登录（第 %d/%d 次）",
+		name, delay.Round(time.Second), step+1, len(loginRetryDelays))
+	m.reconnectAfter(id, delay)
 }
 
 func (m *Manager) healthLoop() {

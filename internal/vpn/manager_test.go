@@ -331,3 +331,23 @@ func TestLatencyModeSamplesEveryPoint(t *testing.T) {
 		}
 	}
 }
+
+// A takeover must not be retried forever, and the delays must grow.
+func TestLoginRetryDelays(t *testing.T) {
+	if len(loginRetryDelays) == 0 {
+		t.Fatal("重连退避不能为空")
+	}
+	prev := time.Duration(0)
+	for i, d := range loginRetryDelays {
+		if d <= 0 {
+			t.Fatalf("第 %d 个退避必须为正，实际 %v", i, d)
+		}
+		if d < prev {
+			t.Fatalf("退避应递增，第 %d 个 %v < %v", i, d, prev)
+		}
+		prev = d
+	}
+	if loginRetryDelays[0] > time.Minute {
+		t.Fatalf("首次重试不应超过 1 分钟，实际 %v", loginRetryDelays[0])
+	}
+}
