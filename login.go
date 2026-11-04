@@ -277,8 +277,11 @@ func (a *app) externalLogin(ctx context.Context, pointName, server, loginURL str
 				host = u.Hostname()
 			}
 		}
-		if !visited.has(host) {
-			logLine("拒绝未访问主机的证书：%s（%s）", host, e.Error)
+		// Only the access point itself needs the exception: its appliance
+		// certificate is self-signed. Everything else (the identity provider,
+		// its scripts) has a normal certificate, and forcing a credential on
+		// those hangs their requests, so they are left to WebKit.
+		if !strings.EqualFold(host, server) {
 			return false
 		}
 		sum := sha256.Sum256(e.Certificate)
@@ -358,34 +361,9 @@ func (a *app) externalLogin(ctx context.Context, pointName, server, loginURL str
 	})
 	page.OnPageTitleUpdated(func(e *mygo.TitleEvent) {
 		logLine("登录页标题：%s", e.Title)
-		// Keep our own title, which shows the scan/waiting state.
-		e.PreventDefault()
 	})
 	// A few providers open the callback with window.open instead of
 	// navigating the page; capture that too, and refuse unrelated popups.
-	page.SetWindowOpenHandler(func(req mygo.WindowOpenRequest) *mygo.WindowOptions {
-		logLine("登录页请求新窗口 %s", loginPageForLog(req.URL))
-		if accept(req.URL) {
-			return nil
-		}
-		// "Continue in the browser" and similar links open the next step in
-		// a popup, which a window-less handler would deny, leaving the login
-		// stuck. Load it in this window instead.
-		if u, err := url.Parse(req.URL); err == nil &&
-			(u.Scheme == "https" || u.Scheme == "http") {
-			target := req.URL
-			// Loading a page from inside the policy callback would
-			// re-enter the WebView; do it on a later turn of the loop.
-			go func() {
-				time.Sleep(50 * time.Millisecond)
-				if err := page.LoadURL(target); err != nil {
-					logLine("登录页新窗口加载失败：%v", err)
-				}
-			}()
-		}
-		return nil
-	})
-
 	loginWin.OnClose(func(e *mygo.CloseEvent) {
 		logLine("登录窗口被关闭")
 		cancel()
