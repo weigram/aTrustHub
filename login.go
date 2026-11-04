@@ -118,9 +118,8 @@ func (a *app) externalLogin(ctx context.Context, pointName, server, loginURL str
 		// user agent as "too old". A current desktop browser's agent is what
 		// the page expects; the request itself is unchanged.
 		Page: mygo.PageOptions{
-			UserAgent:     loginUserAgent,
-			DevTools:      mygo.DevToolsEnabled,
-			PreloadScript: devToolsShortcut,
+			UserAgent: loginUserAgent,
+			DevTools:  mygo.DevToolsEnabled,
 		},
 	})
 	if loginWin.IsDestroyed() {
@@ -292,16 +291,6 @@ func (a *app) externalLogin(ctx context.Context, pointName, server, loginURL str
 				continue
 			}
 			href, _ := raw.(string)
-			reportPageErrors(page, logLine)
-			if strings.Contains(href, "#devtools") {
-				page.OpenDevTools()
-			}
-			if strings.Contains(href, "#browser") && !pasteMode.Load() {
-				pasteMode.Store(true)
-				fallbackURL = ""
-				logLine("按用户要求改用系统浏览器登录")
-				startPasteLogin()
-			}
 			if href != lastHref {
 				lastHref, lastChange, idleLogged = href, time.Now(), false
 			} else if !idleLogged && time.Since(lastChange) > 45*time.Second {
@@ -547,64 +536,6 @@ func identityProviderURL(ctx context.Context, loginURL, server string) string {
 	}
 	return loc
 }
-
-// devToolsShortcut makes F12 (and the usual chord) ask for the web inspector.
-// The page itself cannot open it, so it leaves a marker the window watches for:
-// the login pages are remote, and this keeps the shortcut working on all of
-// them without touching their markup.
-const devToolsShortcut = `(function(){
-  try {
-    if (!window.__hubErrors) {
-      window.__hubErrors = [];
-      window.addEventListener('error', function(e){
-        window.__hubErrors.push('error: ' + (e && e.message ? e.message : 'unknown') +
-          (e && e.filename ? ' @ ' + e.filename + ':' + e.lineno : ''));
-      }, true);
-      window.addEventListener('unhandledrejection', function(e){
-        window.__hubErrors.push('rejection: ' + (e && e.reason ? String(e.reason) : 'unknown'));
-      }, true);
-    }
-  } catch (e) {}
-
-  var mark = function(tag){
-    try { history.replaceState(null, '', '#' + tag); } catch (err) { location.hash = tag; }
-  };
-  var open = function(){ mark('devtools'); };
-  var wants = function(e){ return e.key === 'F12' || (e.key === 'i' && (e.metaKey || e.ctrlKey) && e.shiftKey); };
-  window.addEventListener('keydown', function(e){
-    if (!wants(e)) return;
-    e.preventDefault();
-    open();
-  }, true);
-  // A visible way in: the login page cannot be clicked through by keyboard
-  // focus alone, and this works on every page the login shows.
-  var add = function(){
-    if (document.getElementById('__hub_debug')) return;
-    var b = document.createElement('button');
-    b.id = '__hub_debug';
-    b.textContent = '调试';
-    b.title = '打开开发者工具（也可按 F12）';
-    b.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:2147483647;' +
-      'font:12px -apple-system,system-ui,sans-serif;padding:5px 10px;border-radius:8px;' +
-      'border:1px solid rgba(0,0,0,.2);background:rgba(255,255,255,.92);color:#333;cursor:pointer;' +
-      'box-shadow:0 1px 4px rgba(0,0,0,.18)';
-    b.addEventListener('click', function(e){ e.preventDefault(); e.stopPropagation(); open(); });
-    var c = document.createElement('button');
-    c.id = '__hub_browser';
-    c.textContent = '用浏览器登录';
-    c.title = '在系统浏览器里登录，再把回调地址粘回来';
-    c.style.cssText = b.style.cssText + ';right:64px';
-    c.addEventListener('click', function(e){ e.preventDefault(); e.stopPropagation(); mark('browser'); });
-    var host = document.body || document.documentElement;
-    host.appendChild(b);
-    host.appendChild(c);
-  };
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', add);
-  } else {
-    add();
-  }
-})()`
 
 // pasteProbe returns the page address and what was typed into the callback
 // field, so one poll covers both the shortcut and the address.
@@ -1042,10 +973,7 @@ func (a *app) browserLogin(ctx context.Context, pointName, server, loginURL stri
 		MinHeight:       320,
 		URL:             "about:blank",
 		BackgroundColor: "light-dark(#ffffff, #1e1e1e)",
-		Page: mygo.PageOptions{
-			DevTools:      mygo.DevToolsEnabled,
-			PreloadScript: devToolsShortcut,
-		},
+		Page: mygo.PageOptions{DevTools: mygo.DevToolsEnabled},
 	})
 	if win.IsDestroyed() {
 		return "", errors.New("打不开登录窗口")
@@ -1102,12 +1030,7 @@ func (a *app) browserLogin(ctx context.Context, pointName, server, loginURL stri
 			if err != nil {
 				continue
 			}
-			href, text := parsePasteProbe(raw)
-			reportPageErrors(page, logLine)
-			if strings.Contains(href, "#devtools") {
-				page.OpenDevTools()
-				continue
-			}
+			_, text := parsePasteProbe(raw)
 			text = strings.TrimSpace(text)
 			if !strings.HasPrefix(text, "https://") {
 				continue
