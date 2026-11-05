@@ -44,3 +44,29 @@ func TestToggleStateReachesDisk(t *testing.T) {
 		t.Fatalf("TUN 状态没有落盘：%+v", disk.Settings)
 	}
 }
+
+// 停用所有必须把全部应用写进停用列表：只写「新停用的」会让原先已停用的
+// 应用掉出列表，重启后重新变成启用。
+func TestBulkDisabledCoversEverything(t *testing.T) {
+	ids := []string{"a", "b", "c"}
+
+	off := bulkDisabled(ids, false)
+	if len(off) != 3 {
+		t.Fatalf("停用所有应包含全部应用，得到 %v", off)
+	}
+	for _, want := range ids {
+		found := false
+		for _, got := range off {
+			if got == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("缺少 %s：%v", want, off)
+		}
+	}
+
+	if on := bulkDisabled(ids, true); on != nil {
+		t.Fatalf("启用所有应清空列表，得到 %v", on)
+	}
+}

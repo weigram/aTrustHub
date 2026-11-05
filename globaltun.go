@@ -1,12 +1,13 @@
 package main
 
 import (
-	"sort"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -242,9 +243,6 @@ func (a *app) startGlobalTUN(id string) {
 		"-stop-file", stopPath,
 		"-gui-file", guiPath,
 		"-reload-file", filepath.Join(a.dir, "tun.reload"),
-		// 地址测试必须走真实隧道：TUN 栈会在本地完成握手，直连得到的
-		// 「可达 2ms」是假的。
-		"-probe", filepath.Join(a.dir, "tun.probe"),
 	}
 	privileged := true
 	if err := a.ensureHelperPrivilege(helper, args); err != nil {
@@ -285,6 +283,24 @@ func (a *app) startGlobalTUN(id string) {
 			a.tunPID = 0
 			a.tunPending = false
 			a.toast = "全局 TUN 启动失败：" + tail
+		})
+		return
+	}
+	// 系统 DNS 现在指向 helper。如果它其实没在应答（例如端口被上一轮
+	// 残留的 root 进程占着），整台机器就解析不了任何域名——先确认再宣告成功。
+	skipCheck := os.Getenv("HUB_KEEP_TUN") == "1"
+	if !skipCheck && !helperAnswersDNS(25*time.Second, a.dnsProbeName(id)) {
+		a.tunLogf("startGlobalTUN: helper 未在 127.0.0.1:53 应答，撤销这次启动")
+		_ = a.shutdownHelper(6 * time.Second)
+		a.mgr.SetTunServed(nil)
+		a.win.Update(func() {
+			a.tunOn = false
+			a.tunPID = 0
+			a.tunPending = false
+			a.tunWanted = false
+			a.tunPoints = ""
+			a.tunMirror()
+			a.toast = "全局 TUN 启动失败：DNS 未能就绪（可能有残留的旧进程占用 53 端口）"
 		})
 		return
 	}
@@ -640,4 +656,93 @@ func pickResumePoint(preferred string, views []vpn.View) string {
 		}
 	}
 	return ""
+}
+
+// helperAnswersDNS asks the helper's resolver about a name every machine
+// knows, so a dead 127.0.0.1:53 is caught before the system is pointed at it.
+func helperAnswersDNS(wait time.Duration, name string) bool {
+	deadline := time.Now().Add(wait)
+	for time.Now().Before(deadline) {
+		if dnsQueryAnswers(name) {
+			return true
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return false
+}
+
+// dnsProbeName picks a name the helper must be able to answer: an internal
+// domain of the point when there is one, otherwise the access point's host.
+// "localhost" is useless here because the helper answers it from a builtin
+// table even when its tunnel resolution is broken.
+func (a *app) dnsProbeName(id string) string {
+	for _, entry := range a.allApps() {
+		if entry.PointID != id {
+			continue
+		}
+		for _, addr := range entry.App.Addresses {
+			if addr.Host != "" && net.ParseIP(addr.Host) == nil {
+				return addr.Host
+			}
+		}
+	}
+	if p := a.cfg.Find(id); p != nil && p.Server != "" {
+		return p.Server
+	}
+	return "www.baidu.com"
+}
+
+// dnsQueryAnswers sends one A query to 127.0.0.1:53 and waits for any answer.
+func dnsQueryAnswers(name string) bool {
+	conn, err := net.DialTimeout("udp", "127.0.0.1:53", time.Second)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	query := buildAQuery(name)
+	if _, err := conn.Write(query); err != nil {
+		return false
+	}
+	buf := make([]byte, 512)
+	n, err := conn.Read(buf)
+	return err == nil && n > 12
+}
+
+// buildAQuery builds a minimal DNS query packet for one A record.
+func buildAQuery(name string) []byte {
+	packet := make([]byte, 0, 64)
+	packet = append(packet, 0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
+	for _, label := range strings.Split(strings.TrimSuffix(name, "."), ".") {
+		if len(label) == 0 || len(label) > 63 {
+			continue
+		}
+		packet = append(packet, byte(len(label)))
+		packet = append(packet, label...)
+	}
+	packet = append(packet, 0x00, 0x00, 0x01, 0x00, 0x01)
+	return packet
+}
+
+// cleanupStaleHelper makes sure no helper from a previous run is still holding
+// the DNS port. A leftover root process keeps the system pointed at a resolver
+// nobody serves, which looks exactly like "登录成功但什么都连不上".
+func (a *app) cleanupStaleHelper() {
+	pidPath := filepath.Join(a.dir, "tun.pid")
+	if !pidFileFresh(pidPath, 30*time.Second) {
+		return
+	}
+	a.tunLogf("发现上一轮遗留的 TUN 进程，先请它退出")
+	stopPath := filepath.Join(a.dir, "tun.stop")
+	_ = os.WriteFile(stopPath, []byte("stop"), 0o600)
+	for i := 0; i < 25; i++ {
+		time.Sleep(200 * time.Millisecond)
+		if !pidFileFresh(pidPath, 3*time.Second) {
+			break
+		}
+	}
+	_ = os.Remove(stopPath)
+	if pidFileFresh(pidPath, 2*time.Second) {
+		a.tunLogf("遗留进程仍未退出，请手动结束它以恢复 DNS")
+	}
 }

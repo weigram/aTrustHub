@@ -390,14 +390,40 @@ func (a *app) start() {
 	a.bus.SetNotify(a.invalidate)
 	go a.tailAccessLog()
 	a.mgr.SetDataDir(a.dir)
+	// 上一轮如果被强杀，root helper 可能还占着 127.0.0.1:53。
+	a.cleanupStaleHelper()
 	a.mgr.Start()
 
 	// A slow tick makes TUN follow the online set even when no log line or
 	// click happens to trigger a repaint.
 	go func() {
 		last := time.Now()
+		lastDNSCheck := time.Now()
+		dnsFails := 0
 		for range time.Tick(3 * time.Second) {
 			a.maybeRefreshTUN()
+			// TUN 把系统 DNS 指向自己；它一旦不应答，整台机器就上不了网。
+			// 连续两次检查失败就主动关掉 TUN，把网络还给系统。
+			if a.tunOn && time.Since(lastDNSCheck) > 20*time.Second {
+				lastDNSCheck = time.Now()
+				if a.tunPoints != "" {
+					name := a.dnsProbeName(firstPointID(a.tunPoints))
+					if helperAnswersDNS(3*time.Second, name) {
+						dnsFails = 0
+					} else {
+						dnsFails++
+						a.tunLogf("DNS 自检失败（%d/3，探测 %s）", dnsFails, name)
+						if dnsFails >= 3 {
+							dnsFails = 0
+							a.tunLogf("TUN 的 DNS 不再应答，自动关闭 TUN 以恢复系统网络")
+							go a.stopTUNSerialized()
+							a.win.Update(func() {
+								a.toast = "TUN 的 DNS 停止应答，已自动关闭 TUN 以恢复网络"
+							})
+						}
+					}
+				}
+			}
 			if time.Since(last) > 60*time.Second {
 				last = time.Now()
 				a.tunLogf("巡检：on=%v pending=%v 已建=%q 当前=%q", a.tunOn, a.tunPending, a.tunPoints, a.onlineSnapshot())
@@ -628,4 +654,14 @@ func (a *app) describeProgress() string {
 	default:
 		return fmt.Sprintf("%d / %d 个在线", online, total)
 	}
+}
+
+// firstPointID returns the first id of a comma-joined snapshot.
+func firstPointID(snapshot string) string {
+	for _, id := range strings.Split(snapshot, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			return id
+		}
+	}
+	return ""
 }

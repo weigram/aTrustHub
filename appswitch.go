@@ -80,29 +80,19 @@ func (a *app) appName(pointID, appID string) string {
 // one access point at once, which is what the two buttons on its card do.
 func (a *app) setAllAppsEnabled(pointID string, enabled bool) {
 	var name string
-	count := 0
-	ids := make([]string, 0, 8)
+	ids := a.appIDs(pointID)
+	if len(ids) == 0 {
+		a.toast = "这个接入点还没有应用列表，先登录它"
+		return
+	}
+	want := bulkDisabled(ids, enabled)
 	_, err := a.store.Update(func(cfg *model.Config) error {
 		p := cfg.Find(pointID)
 		if p == nil {
 			return fmt.Errorf("找不到这个接入点")
 		}
 		name = p.Name
-		ids = a.appIDs(pointID)
-		if enabled {
-			count = len(p.DisabledApps)
-			p.DisabledApps = nil
-			return nil
-		}
-		disabled := make([]string, 0, len(ids))
-		for _, id := range ids {
-			if !p.AppDisabled(id) {
-				disabled = append(disabled, id)
-			}
-		}
-		count = len(disabled)
-		sort.Strings(disabled)
-		p.DisabledApps = disabled
+		p.DisabledApps = want
 		return nil
 	})
 	if err != nil {
@@ -123,11 +113,23 @@ func (a *app) setAllAppsEnabled(pointID string, enabled bool) {
 		})
 	}
 	if enabled {
-		a.toast = fmt.Sprintf("已启用「%s」的全部应用隧道代理（%d 个已恢复）", name, count)
+		a.toast = fmt.Sprintf("已启用「%s」的全部应用隧道代理（%d 个）", name, len(ids))
 	} else {
-		a.toast = fmt.Sprintf("已停用「%s」的全部应用隧道代理（%d 个）", name, count)
+		a.toast = fmt.Sprintf("已停用「%s」的全部应用隧道代理（%d 个）", name, len(ids))
 	}
 	a.invalidate()
+}
+
+// bulkDisabled is what the stop list must become after a bulk action.
+// Enabling clears it; disabling must hold EVERY application, otherwise the ones
+// already off would fall out of the list and come back on.
+func bulkDisabled(appIDs []string, enabled bool) []string {
+	if enabled {
+		return nil
+	}
+	out := append([]string(nil), appIDs...)
+	sort.Strings(out)
+	return out
 }
 
 // appIDs lists the application identifiers the point published.

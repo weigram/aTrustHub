@@ -148,8 +148,14 @@ func wecomBridge() *http.Client {
 				if err != nil {
 					return nil, err
 				}
-				d := &net.Dialer{Timeout: 2 * time.Second}
-				return d.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", port))
+				d := &net.Dialer{Timeout: 1500 * time.Millisecond}
+				// 有的客户端只绑在 IPv6 回环上（Windows 上见过），
+				// 所以两个回环地址都试；先试 IPv4，本地几乎总是它。
+				conn, err := d.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", port))
+				if err == nil {
+					return conn, nil
+				}
+				return d.DialContext(ctx, network, net.JoinHostPort("::1", port))
 			},
 		},
 	}

@@ -105,17 +105,6 @@ func (r *Resolver) Resolve(ctx context.Context, host string) (resCtx context.Con
 		log.DebugPrintf("Domain resource found: %s", domain)
 	}
 
-	// 目标写成 IP 时不需要解析：直接用这个地址，并把应用归属记下来，
-	// 否则它会被当成域名映射成只有 TUN 在场时才有效的假地址。
-	if ip := net.ParseIP(host); ip != nil {
-		if domainResourceFound {
-			if err := r.IPPool.SetIPDomain(ip, host, domainResources); err != nil {
-				log.DebugPrintf("Set IP err: %s", err)
-			}
-		}
-		return ctx, ip, nil
-	}
-
 	if cachedIP, found := r.getDNSCache(host); found {
 		log.Printf("%s -> %s", host, cachedIP.String())
 		return ctx, cachedIP, nil
@@ -148,8 +137,6 @@ func (r *Resolver) Resolve(ctx context.Context, host string) (resCtx context.Con
 			return ctx, ip, nil
 		}
 
-		// 目标本身就是 IP 时不能给假地址：假地址只有 TUN 在场时才可用，
-		// 应用自己的 SOCKS 通道直接用真实 IP 才能到服务器。
 		if fakeIPValue := ctx.Value(ContextKeyFakeIP); fakeIPValue != nil {
 			if domainResourceFound {
 				ip := r.IPPool.GenerateIP(host, domainResources)

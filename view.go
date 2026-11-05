@@ -524,14 +524,14 @@ func (a *app) probeHostText(id, host string, ports []int) string {
 		ports = []int{443, 80}
 	}
 	// 全局 TUN 接管时，本地的拨号在 TUN 栈里就完成了握手，测出来永远是
-	// 「可达 2ms」。这时让 helper 用真实隧道连一次。
+	// 「可达 2ms」。这时让 helper 用真实隧道连一次；helper 不支持时退回直连。
 	if a.tunOn && hostInTun(a.tunPoints, id) {
 		if point := a.cfg.Find(id); point != nil {
 			for _, p := range ports {
 				addr := net.JoinHostPort(host, strconv.Itoa(p))
-				ok, ms, errText, answered := a.probeTunnel(point.Name, addr, 6*time.Second)
+				ok, ms, errText, answered := a.probeTunnel(point.Name, addr, 2*time.Second)
 				if !answered {
-					return fmt.Sprintf("⚠️ %s 无法通过隧道确认（helper 没有回应）", addr)
+					return a.directProbeText(id, host, ports)
 				}
 				if ok {
 					return fmt.Sprintf("✅ %s 可达（%d ms，经隧道）", addr, ms)
@@ -541,6 +541,15 @@ func (a *app) probeHostText(id, host string, ports []int) string {
 				}
 			}
 		}
+	}
+	return a.directProbeText(id, host, ports)
+}
+
+// directProbeText dials one host through the local dialer, which is all that is
+// possible when the helper cannot answer probes.
+func (a *app) directProbeText(id, host string, ports []int) string {
+	if len(ports) == 0 {
+		ports = []int{443, 80}
 	}
 	type result struct {
 		port int

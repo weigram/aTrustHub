@@ -270,7 +270,7 @@ func (a *app) wecomStaticQRLogin(ctx context.Context, pointName, server, loginUR
 	// confirm (免扫码). Scanning still works at any time.
 	onLocalLogin := func(say func(string)) {
 		say("正在查找电脑版企业微信…")
-		ports := append(append([]int{}, settings.HTTPSPorts...), 50010, 50011, 50012, 50013)
+		ports := wecomDesktopPorts(append(append([]int{}, settings.HTTPSPorts...), 50010, 50011, 50012, 50013))
 		port, desktop := wecomDesktopState(ctx, ports, loginURL, settings.RedirectURI)
 		if !desktop {
 			logLine("未检测到电脑企业微信（已尝试端口 %v），请在手机企业微信扫码登录", ports)
