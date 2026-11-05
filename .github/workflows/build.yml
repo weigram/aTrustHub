@@ -79,7 +79,11 @@ jobs:
             GOOS=darwin GOARCH=arm64 go build -o ../../resources/darwin-arm64/zju-connect-multitun ./cmd/multitun
             GOOS=darwin GOARCH=amd64 go build -o ../../resources/darwin-amd64/zju-connect-multitun ./cmd/multitun
           else
-            arch="${matrix.platform#windows/}"
+            # 注意：${matrix.platform} 不是合法的 bash 变量名，必须先用
+            # GitHub 表达式取出来，再在 bash 里截断前缀。
+            platform="${{ matrix.platform }}"
+            arch="${platform#windows/}"
+            mkdir -p "../../resources/windows-$arch"
             GOOS=windows GOARCH="$arch" go build -ldflags "-H=windowsgui" \
               -o "../../resources/windows-$arch/zju-connect-multitun.exe" ./cmd/multitun
           fi
