@@ -1517,7 +1517,7 @@ func (a *app) logoutView(c *ui.Context) {
 	ui.Modal(c, &open, func() {
 		ui.Column(c).Width(440).Gap(10).Children(func() {
 			ui.Text(c, "退出登录").FontSize(17).Bold()
-			ui.Text(c, "退出 "+name+" 会清除保存的认证信息，下次登录需要重新扫码。").
+			ui.Text(c, "退出 "+name+" 会清除保存的认证信息与浏览器登录数据（cookie），下次登录需要重新认证。").
 				FontSize(12).TextColor(t.Text)
 			ui.Text(c, "如果只是想暂时断开、稍后继续用同一个账号，点「断开」即可，"+
 				"那样下次登录会直接复用这次认证，不会弹二维码。").
@@ -1530,8 +1530,13 @@ func (a *app) logoutView(c *ui.Context) {
 					TextColor(ui.Hex("#ffffff")).Clicked() {
 					id := a.logoutAsk
 					a.logoutAsk = ""
-					go a.mgr.Logout(id)
-					a.toast = "已退出登录，下次登录需要重新扫码"
+					go func() {
+						a.mgr.Logout(id)
+						// 单点登录的浏览器里还留着身份提供方的会话，
+						// 不清掉的话下次打开浏览器又会自动登录回同一个账号。
+						a.clearBrowserLoginProfile(id)
+					}()
+					a.toast = "已退出登录，下次登录需要重新认证"
 				}
 			})
 		})

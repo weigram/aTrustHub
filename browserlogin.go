@@ -57,6 +57,14 @@ func (a *app) cdpLoginCallback(ctx context.Context, point *model.AccessPoint, lo
 	// 上次留下的浏览器还在跑就直接用它，否则新启动会被它接管、端口不监听。
 	var client *cdp.Client
 	var proc *browserProc
+	var tempProfile string
+	// 临时配置目录只是为了绕过被占用的配置文件，用完就删，别越堆越多。
+	// 它注册得比 stopBrowser 早，所以会在浏览器关掉之后才执行。
+	defer func() {
+		if tempProfile != "" {
+			_ = os.RemoveAll(tempProfile)
+		}
+	}()
 	if st, ok := readBrowserState(a.dir, point.ID); ok {
 		if c, err := cdp.AttachFor(ctx, st.Port, host); err == nil {
 			client, port = c, st.Port
@@ -64,6 +72,10 @@ func (a *app) cdpLoginCallback(ctx context.Context, point *model.AccessPoint, lo
 		}
 	}
 	if client == nil {
+		// Windows 上关掉窗口后进程常常还活着，下一次启动会被它接管、
+		// 调试端口不监听，于是只能退到临时配置目录——那看起来就是
+		// 「每次都开一个新的、上次的登录状态没了」。
+		killBrowsersUsingProfile(profile, logf)
 		logf("浏览器登录：启动 %s，调试端口 %d", filepath.Base(exe), port)
 		proc, err = launchBrowser(exe, profile, port, loginURL)
 		if err != nil {
@@ -80,6 +92,7 @@ func (a *app) cdpLoginCallback(ctx context.Context, point *model.AccessPoint, lo
 			logf("浏览器 18 秒内没有响应（%v），改用临时配置目录重试；这一次不会带上已保存的密码与登录状态", err)
 			proc.Stop()
 			unique := fmt.Sprintf("%s-%d", profile, time.Now().Unix())
+			tempProfile = unique
 			port, err = cdp.FreePort()
 			if err != nil {
 				return "", fmt.Errorf("无法分配调试端口：%w", err)
@@ -370,4 +383,74 @@ func browserExecutable() string {
 		}
 	}
 	return ""
+}
+
+// killBrowsersUsingProfile stops browser processes that still hold profile.
+// A running instance makes a new launch hand off and exit, which is why a
+// login sometimes had to fall back to a throwaway profile.
+func killBrowsersUsingProfile(profile string, logf func(string, ...any)) {
+	if profile == "" {
+		return
+	}
+	if runtime.GOOS == "windows" {
+		quoted := strings.ReplaceAll(profile, "'", "''")
+		script := "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe' OR Name='msedge.exe' OR Name='chromium.exe'\" " +
+			"| Where-Object { $_.CommandLine -and $_.CommandLine.Contains('" + quoted + "') } " +
+			"| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+		if err := newCmd("powershell", "-NoProfile", "-NonInteractive", "-Command", script).Run(); err == nil {
+			logf("已关闭仍占用浏览器配置的旧实例")
+		}
+		return
+	}
+	out, err := exec.Command("ps", "-axo", "pid=,command=").Output()
+	if err != nil {
+		return
+	}
+	needle := "--user-data-dir=" + profile
+	killed := 0
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.Contains(line, needle) {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		var pid int
+		if _, err := fmt.Sscanf(fields[0], "%d", &pid); err != nil || pid <= 0 {
+			continue
+		}
+		if proc, err := os.FindProcess(pid); err == nil {
+			if proc.Kill() == nil {
+				killed++
+			}
+		}
+	}
+	if killed > 0 {
+		logf("已关闭 %d 个仍占用浏览器配置的旧实例", killed)
+	}
+}
+
+// clearBrowserLoginProfile forgets everything the login browser kept for a
+// point: cookies, localStorage, the identity provider's session. The next
+// browser login therefore starts empty, so "退出登录" really means a different
+// account can be used.
+func (a *app) clearBrowserLoginProfile(pointID string) {
+	if pointID == "" {
+		return
+	}
+	// 还开着的登录浏览器先把进程收掉，否则文件被占用删不干净。
+	closeLoginBrowser(a.dir, pointID)
+	base := filepath.Join(a.dir, "browser", pointID)
+	if err := os.RemoveAll(base); err != nil {
+		a.tunLogf("清除浏览器登录数据失败：%v", err)
+	} else {
+		a.tunLogf("已清除该接入点的浏览器登录数据（cookie / localStorage）")
+	}
+	// 重试时会让临时配置目录，一并清掉。
+	if matches, err := filepath.Glob(base + "-*"); err == nil {
+		for _, m := range matches {
+			_ = os.RemoveAll(m)
+		}
+	}
 }

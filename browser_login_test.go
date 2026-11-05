@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,5 +70,50 @@ func TestCloseLoginBrowserStopsIt(t *testing.T) {
 	}
 	if _, ok := readBrowserState(dir, "p1"); ok {
 		t.Fatal("状态文件应当被清除")
+	}
+}
+
+// 临时配置目录用完必须删掉，否则每失败一次就多一个文件夹。
+func TestTempProfileName(t *testing.T) {
+	dir := t.TempDir()
+	base := dir + "/point-id"
+	temp := fmt.Sprintf("%s-%d", base, time.Now().Unix())
+	if err := os.MkdirAll(temp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(temp, base+"-") {
+		t.Fatalf("临时目录命名不符合约定：%s", temp)
+	}
+	if err := os.RemoveAll(temp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(temp); !os.IsNotExist(err) {
+		t.Fatal("临时目录没有被删除")
+	}
+}
+
+// 退出登录必须把这个接入点的浏览器数据清空，否则下次打开浏览器
+// 身份提供方还在，会直接自动登回上一个账号。
+func TestClearBrowserLoginProfile(t *testing.T) {
+	a := testApp(t)
+	base := filepath.Join(a.dir, "browser", "p1")
+	if err := os.MkdirAll(filepath.Join(base, "Default"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "Default", "Cookies"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	temp := base + "-1730000000"
+	if err := os.MkdirAll(temp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	a.clearBrowserLoginProfile("p1")
+
+	if _, err := os.Stat(base); !os.IsNotExist(err) {
+		t.Fatal("配置目录没有被清除")
+	}
+	if _, err := os.Stat(temp); !os.IsNotExist(err) {
+		t.Fatal("临时配置目录没有被清除")
 	}
 }

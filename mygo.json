@@ -1,7 +1,7 @@
 {
   "name": "aTrustHub",
   "identifier": "app.atrust.hub",
-  "version": "0.26.12",
+  "version": "0.26.13",
   "copyright": "Copyright © 2026 aTrust Hub",
   "out": "build",
   "macos": {
