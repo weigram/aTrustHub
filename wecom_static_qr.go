@@ -20,6 +20,11 @@ import (
 
 var settingsPattern = regexp.MustCompile(`(?s)window\.settings\s*=\s*(\{.*?\});`)
 
+// errWeComLocalUnavailable means the desktop client refuses this program on
+// its local bridge and the login has to be finished in a real browser, which
+// the client does serve. externalLogin's caller hands over to the browser.
+var errWeComLocalUnavailable = errors.New("电脑版企业微信不向本程序开放本地桥")
+
 // fetchQyWechat gets the older qrconnect page's settings and QR image. Both
 // are public; the status key is all the polling needs.
 func fetchQyWechat(ctx context.Context, loginURL string) (qyWechatSettings, []byte, error) {
@@ -77,13 +82,17 @@ func fetchQyWechat(ctx context.Context, loginURL string) (qyWechatSettings, []by
 // no JavaScript, no external resource and no polling in the page: the login
 // is driven entirely from Go, so the WebView can never freeze on the page's
 // own scripts.
-func wecomStaticHTML(title, instruction string, png []byte, showLocalBtn bool) string {
+func wecomStaticHTML(title, instruction string, png []byte, showLocalBtn, showBrowserBtn bool) string {
 	b64 := base64.StdEncoding.EncodeToString(png)
 	btn := ""
 	if showLocalBtn {
 		// 每次点击写一个不同的 hash：下面的看门狗拿它和上一次比，才能把
 		// 「再点一次」和「上一次点击」分开。
 		btn = `<a id="local" href="#local" onclick="try{location.hash='local-'+(new Date().getTime())}catch(e){};return false;">本地企业微信认证</a>`
+	}
+	if showBrowserBtn {
+		// 客户端只对浏览器开放本地桥时，这条路是唯一能走通的。
+		btn += `<a id="browser" href="#browser" onclick="try{location.hash='browser-'+(new Date().getTime())}catch(e){};return false;">改用浏览器完成</a>`
 	}
 	return `<!doctype html><html><head><meta charset="utf-8">` +
 		`<style>` +
@@ -98,6 +107,9 @@ func wecomStaticHTML(title, instruction string, png []byte, showLocalBtn bool) s
 		`#local{display:inline-block;margin-top:6px;padding:9px 18px;border-radius:8px;` +
 		`background:#1769e0;color:#fff;font-size:13px;text-decoration:none;cursor:pointer;}` +
 		`#local:hover{background:#1257bd;}` +
+		`#browser{display:inline-block;margin-top:2px;padding:7px 14px;border-radius:8px;` +
+		`border:1px solid #d5d9e0;color:#444;font-size:12px;text-decoration:none;cursor:pointer;}` +
+		`#browser:hover{border-color:#1769e0;color:#1769e0;}` +
 		`</style></head><body><div class="wrap">` +
 		`<h1>` + html.EscapeString(title) + `</h1>` +
 		`<img alt="二维码" src="data:image/png;base64,` + b64 + `">` +
@@ -112,7 +124,7 @@ func wecomStaticHTML(title, instruction string, png []byte, showLocalBtn bool) s
 // shows a "本地企业微信认证" button that, clicked, calls onLocalLogin (the
 // desktop quick-login path). The window itself never reports the login
 // result; the caller's poller does.
-func openStaticQRWindow(ctx context.Context, title, instruction string, png []byte, showLocalBtn bool, onLocalLogin func(say func(string)), done <-chan struct{}, onClose func()) error {
+func openStaticQRWindow(ctx context.Context, title, instruction string, png []byte, showLocalBtn bool, onLocalLogin, onBrowserLogin func(say func(string)), done <-chan struct{}, onClose func()) error {
 	win := mygo.NewWindow(mygo.WindowOptions{
 		Title:           title,
 		Width:           360,
@@ -165,7 +177,7 @@ func openStaticQRWindow(ctx context.Context, title, instruction string, png []by
 			}
 		}
 	})
-	page.LoadHTML(wecomStaticHTML(title, instruction, png, showLocalBtn), "")
+	page.LoadHTML(wecomStaticHTML(title, instruction, png, showLocalBtn, onBrowserLogin != nil), "")
 	// Activate the app first: a new window created while the app is in the
 	// background can open behind other apps, which looks like nothing happened.
 	mygo.App.Focus()
@@ -203,6 +215,12 @@ func openStaticQRWindow(ctx context.Context, title, instruction string, png []by
 					continue
 				}
 				last = token
+				if strings.HasPrefix(token, "browser-") {
+					if onBrowserLogin != nil {
+						go onBrowserLogin(say)
+					}
+					continue
+				}
 				go onLocalLogin(say)
 			}
 		}()
@@ -256,6 +274,10 @@ func (a *app) wecomStaticQRLogin(ctx context.Context, pointName, server, loginUR
 	userClosed := make(chan struct{}, 1)
 	cbCh := make(chan string, 1)
 	errCh := make(chan error, 1)
+	// winCtx 只关这个窗口；wantBrowser 记录「关窗是为了交给浏览器」。
+	winCtx, stopWin := context.WithCancel(ctx)
+	defer stopWin()
+	var wantBrowser atomic.Bool
 
 	// Poll the status from Go. Scanning the QR drives the same endpoint, so
 	// the scan path needs nothing else. The desktop "免扫码" path is started
@@ -278,9 +300,9 @@ func (a *app) wecomStaticQRLogin(ctx context.Context, pointName, server, loginUR
 	}()
 
 	// The "本地企业微信认证" button: find the desktop client and ask it to
-	// confirm (免扫码). Scanning still works at any time, and the button keeps
-	// working after a failed attempt, so the client can be started and tried
-	// again without closing the window.
+	// confirm (免扫码). When that cannot work, the same login is handed to a
+	// real browser without another click: the client serves browsers, so the
+	// browser is where the button lives that this program cannot press.
 	var localBusy atomic.Bool
 	onLocalLogin := func(say func(string)) {
 		if !localBusy.CompareAndSwap(false, true) {
@@ -288,6 +310,21 @@ func (a *app) wecomStaticQRLogin(ctx context.Context, pointName, server, loginUR
 			return
 		}
 		defer localBusy.Store(false)
+
+		// fallbackToBrowser reports whether the window was handed over; when
+		// it returns false there is no browser, and the page keeps its text.
+		fallbackToBrowser := func(reason string) bool {
+			if browserExecutable() == "" {
+				return false
+			}
+			logLine("本地认证没成功（%s），自动改用系统浏览器完成", reason)
+			say("正在打开浏览器…")
+			wantBrowser.Store(true)
+			// 让这句话有机会显示出来，再关窗；250ms 对手感没有影响。
+			time.Sleep(250 * time.Millisecond)
+			stopWin()
+			return true
+		}
 
 		say("正在查找电脑版企业微信…")
 		targets := bridgeTargets(settings)
@@ -300,23 +337,44 @@ func (a *app) wecomStaticQRLogin(ctx context.Context, pointName, server, loginUR
 			say("已找到电脑版企业微信，请在企业微信里点「确认登录」")
 			if _, err := bridge.bind(ctx, loginURL, settings.ClientKey); err != nil {
 				logLine("发送确认请求失败：%v", err)
+				if fallbackToBrowser("确认请求被拒") {
+					return
+				}
 				say("发送确认请求失败：" + err.Error())
 				return
 			}
 			logLine("已请求电脑企业微信确认，请在企业微信里点「确认登录」")
 		case probe.reachable:
 			logLine("电脑版企业微信有响应但没有登录（%s）：%s", probe.target, probe.summary())
+			if fallbackToBrowser("客户端未登录") {
+				return
+			}
 			say("电脑版企业微信没有登录：先在客户端登录再点一次，或直接用手机扫码")
 		case probe.reject != "":
 			logLine("电脑版企业微信拒绝了请求（%s）：%s", probe.rejectTarget, probe.reject)
+			if fallbackToBrowser("本地桥拒绝") {
+				return
+			}
 			say("电脑版企业微信拒绝了本地请求，请改用手机扫码")
 		default:
 			logLine("未检测到电脑企业微信（%d 个目标）：%s", len(targets), probe.summary())
+			// 客户端只把本地桥开放给浏览器，本程序怎么握手都会被重置。
+			if fallbackToBrowser("连不上本地桥") {
+				return
+			}
 			say("未检测到电脑版企业微信，请在手机上扫码（先打开并登录企业微信客户端可免扫码）")
 		}
 	}
 
-	winErr := openStaticQRWindow(ctx, "企业微信扫码登录 — "+pointName, instruction, png, true, onLocalLogin, done, func() {
+	// 「改用浏览器完成」：关掉这个窗口，由 externalLogin 交给真实浏览器。
+	onBrowserLogin := func(say func(string)) {
+		logLine("按要求改用系统浏览器完成登录")
+		say("正在打开浏览器…")
+		wantBrowser.Store(true)
+		stopWin()
+	}
+
+	winErr := openStaticQRWindow(winCtx, "企业微信扫码登录 — "+pointName, instruction, png, true, onLocalLogin, onBrowserLogin, done, func() {
 		select {
 		case userClosed <- struct{}{}:
 		default:
@@ -342,7 +400,10 @@ func (a *app) wecomStaticQRLogin(ctx context.Context, pointName, server, loginUR
 		default:
 		}
 		return "", errLoginCanceled, true
-	case <-ctx.Done():
+	case <-winCtx.Done():
+		if wantBrowser.Load() {
+			return "", errWeComLocalUnavailable, true
+		}
 		return "", ctx.Err(), true
 	}
 }
@@ -387,7 +448,7 @@ func (a *app) qywechatStaticQRLogin(ctx context.Context, pointName, server, logi
 	}()
 
 	instruction := "请使用手机企业微信扫描二维码，并在手机上点「确认登录」。"
-	winErr := openStaticQRWindow(ctx, "企业微信扫码登录 — "+pointName, instruction, qrPNG, false, nil, done, func() {
+	winErr := openStaticQRWindow(ctx, "企业微信扫码登录 — "+pointName, instruction, qrPNG, false, nil, nil, done, func() {
 		select {
 		case userClosed <- struct{}{}:
 		default:
@@ -510,8 +571,10 @@ func clickToken(raw any) (string, bool) {
 		return "", false
 	}
 	s = strings.TrimPrefix(strings.TrimSpace(s), "#")
-	if !strings.HasPrefix(s, "local-") || len(s) <= len("local-") {
-		return "", false
+	for _, prefix := range []string{"local-", "browser-"} {
+		if strings.HasPrefix(s, prefix) && len(s) > len(prefix) {
+			return s, true
+		}
 	}
-	return s, true
+	return "", false
 }

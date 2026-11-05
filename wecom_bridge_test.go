@@ -233,6 +233,8 @@ func TestClickToken(t *testing.T) {
 	}{
 		{"#local-1699999999", "local-1699999999", true},
 		{"#local-1", "local-1", true},
+		{"#browser-1699999999", "browser-1699999999", true},
+		{"#browser-", "", false},
 		{"", "", false},
 		{"#local", "", false},
 		{"#local-", "", false},
@@ -444,5 +446,24 @@ func TestBridgeTargetsOrderAndSweep(t *testing.T) {
 	}
 	if !sawHTTP {
 		t.Fatal("http 端口族没有被列入候选")
+	}
+}
+
+// 页面要有两个入口，且浏览器入口只在允许兜底时出现。
+func TestWeComStaticHTMLEntries(t *testing.T) {
+	png := []byte{0x89, 0x50, 0x4e, 0x47}
+	local := wecomStaticHTML("标题", "说明", png, true, false)
+	if !strings.Contains(local, `id="local"`) {
+		t.Fatal("缺少本地认证入口")
+	}
+	if strings.Contains(local, `id="browser"`) {
+		t.Fatal("没有浏览器兜底时不该出现浏览器入口")
+	}
+	both := wecomStaticHTML("标题", "说明", png, true, true)
+	if !strings.Contains(both, `id="browser"`) {
+		t.Fatal("缺少浏览器兜底入口")
+	}
+	if !strings.Contains(both, "location.hash='browser-'") {
+		t.Fatal("浏览器入口要写自己的 hash 前缀")
 	}
 }

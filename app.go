@@ -4,8 +4,6 @@
 package main
 
 import (
-	"sync/atomic"
-	"time"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/transfer"
@@ -31,7 +31,7 @@ const version = "0.1.0"
 // app is everything the window shows and the manager that does the work.
 // appBuild is shown in the footer and the startup log so an old running
 // instance is easy to tell apart from a freshly built one.
-const appBuild = "0.26.9"
+const appBuild = "0.26.10"
 
 type app struct {
 	win   *mygo.Window
@@ -159,18 +159,18 @@ type editorDraft struct {
 	autoConnect   bool
 	// autoPick lets detection choose the auth mode: what a point saved by an
 	// older version (mode "auto") gets when it is opened.
-	autoPick      bool
-	monitor       bool
-	monitorEvery  string
-	secretStore   string
-	clearTOTP     bool
-	hasPassword   bool
-	hasTOTP       bool
-	detected      []string
-	detecting     bool
-	detectGen     int
-	detectErr     string
-	err           string
+	autoPick     bool
+	monitor      bool
+	monitorEvery string
+	secretStore  string
+	clearTOTP    bool
+	hasPassword  bool
+	hasTOTP      bool
+	detected     []string
+	detecting    bool
+	detectGen    int
+	detectErr    string
+	err          string
 }
 
 type settingsDraft struct {
@@ -550,7 +550,14 @@ func (a *app) credentials(id string) (vpn.Credentials, error) {
 		// point keeps the old "hand over to the system browser" switch.
 		inBrowser := mode == model.AuthModeAuto && point.LoginInBrowser
 		external = func(ctx context.Context, loginURL string) (string, error) {
-			return a.externalLogin(ctx, name, server, loginURL, inBrowser)
+			cb, err := a.externalLogin(ctx, name, server, loginURL, inBrowser)
+			if errors.Is(err, errWeComLocalUnavailable) && point != nil && browserExecutable() != "" {
+				// 客户端只把本地桥开放给浏览器，本程序直接连会被重置；这时
+				// 交给真实浏览器，页面自己会去敲本地桥并弹确认框。
+				a.tunLogf("[%s] 本地企业微信认证不可用，改用系统浏览器完成", name)
+				return a.cdpLoginCallback(ctx, point, loginURL)
+			}
+			return cb, err
 		}
 	}
 	switch mode {
