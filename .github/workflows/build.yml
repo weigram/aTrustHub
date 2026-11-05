@@ -42,10 +42,17 @@ jobs:
           - os: macos-latest
             platform: darwin/universal
             artifact: macos
-          # Windows 产物是 NSIS 安装包（atrusthub-setup-<版本>-amd64.exe）。
+          # Windows 产物是 NSIS 安装包（atrusthub-setup-<版本>-<arch>.exe）。
+          # 三种架构都要编对应的 helper，32 位系统里放 64 位 helper 是跑不起来的。
           - os: windows-latest
             platform: windows/amd64
             artifact: windows-amd64
+          - os: windows-latest
+            platform: windows/386
+            artifact: windows-386
+          - os: windows-latest
+            platform: windows/arm64
+            artifact: windows-arm64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -72,7 +79,9 @@ jobs:
             GOOS=darwin GOARCH=arm64 go build -o ../../resources/darwin-arm64/zju-connect-multitun ./cmd/multitun
             GOOS=darwin GOARCH=amd64 go build -o ../../resources/darwin-amd64/zju-connect-multitun ./cmd/multitun
           else
-            GOOS=windows GOARCH=amd64 go build -ldflags "-H=windowsgui" -o ../../resources/windows-amd64/zju-connect-multitun.exe ./cmd/multitun
+            arch="${matrix.platform#windows/}"
+            GOOS=windows GOARCH="$arch" go build -ldflags "-H=windowsgui" \
+              -o "../../resources/windows-$arch/zju-connect-multitun.exe" ./cmd/multitun
           fi
           find ../../resources -maxdepth 2 -type f | sort
 
