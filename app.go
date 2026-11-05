@@ -31,7 +31,7 @@ const version = "0.1.0"
 // app is everything the window shows and the manager that does the work.
 // appBuild is shown in the footer and the startup log so an old running
 // instance is easy to tell apart from a freshly built one.
-const appBuild = "0.26.11"
+const appBuild = "0.26.12"
 
 type app struct {
 	win   *mygo.Window
@@ -122,9 +122,9 @@ type app struct {
 	// binding a widget to a local makes the click write to a dead address.
 	appSwitch map[string]*bool
 	// appFilter narrows the workbench to enabled or disabled applications:
-	// "all", "on" or "off". appFilterLabel is what the dropdown shows.
+	// "all", "on" or "off". appFilterIndex is the segmented control's choice.
 	appFilter      string
-	appFilterLabel string
+	appFilterIndex int
 	// appCollapsed remembers which access points' app groups are collapsed
 	// (true = collapsed). A point is expanded by default.
 	appCollapsed map[string]bool
@@ -254,14 +254,13 @@ func newApp() (*app, error) {
 	}
 
 	a := &app{
-		store:          st,
-		dir:            dir,
-		bus:            vpn.NewLogBus(600),
-		loginSem:       make(chan struct{}, 1),
-		icon:           loadAppIcon(),
-		appSwitch:      map[string]*bool{},
-		appFilter:      "all",
-		appFilterLabel: "所有",
+		store:     st,
+		dir:       dir,
+		bus:       vpn.NewLogBus(600),
+		loginSem:  make(chan struct{}, 1),
+		icon:      loadAppIcon(),
+		appSwitch: map[string]*bool{},
+		appFilter: "all",
 	}
 	logPath := os.Getenv("EASYCONNECT_LOG")
 	if logPath == "" {

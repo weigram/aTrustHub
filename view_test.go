@@ -439,23 +439,35 @@ func TestAuthModeAutoPick(t *testing.T) {
 	}
 }
 
-func TestCanLogoutOnlyForWeCom(t *testing.T) {
-	cases := []struct {
-		mode model.AuthMode
-		want bool
-	}{
-		{model.AuthModeWeCom, true},
-		{model.AuthModePassword, false},
-		{model.AuthModeSSO, false},
-		{model.AuthModeAuto, false},
+// 退出登录只对外部登录得到的会话出现：企业微信、单点登录，以及没有存密码的
+// 老配置 auto（那条路也是企业微信）。
+func TestCanLogoutFollowsLoginSource(t *testing.T) {
+	a := testApp(t)
+
+	mk := func(mode model.AuthMode) *model.AccessPoint {
+		p := &model.AccessPoint{Name: "点", Server: "vpn.example.edu.cn", AuthMode: string(mode)}
+		p.ID = "p-" + string(mode)
+		return p
 	}
-	for _, c := range cases {
-		p := &model.AccessPoint{AuthMode: string(c.mode)}
-		if got := canLogout(p); got != c.want {
-			t.Errorf("canLogout(%s) = %v, want %v", c.mode, got, c.want)
+	for _, mode := range []model.AuthMode{model.AuthModeWeCom, model.AuthModeSSO} {
+		if !a.canLogout(mk(mode)) {
+			t.Errorf("%s 应当有退出登录", mode)
 		}
 	}
-	if canLogout(nil) {
+	if !a.canLogout(mk(model.AuthModeAuto)) {
+		t.Error("没有密码的老配置 auto 走企业微信，应当有退出登录")
+	}
+	auto := mk(model.AuthModeAuto)
+	if err := a.store.SetPassword(auto.ID, "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if a.canLogout(auto) {
+		t.Error("auto 有密码时走密码登录，不该有退出登录")
+	}
+	if a.canLogout(mk(model.AuthModePassword)) {
+		t.Error("密码登录不该有退出登录")
+	}
+	if a.canLogout(nil) {
 		t.Error("nil 接入点不应显示退出登录")
 	}
 }
@@ -486,8 +498,18 @@ func TestSetAllAppsEnabled(t *testing.T) {
 
 // 过滤按「隧道代理」状态筛选，且不影响搜索。
 func TestAppFilter(t *testing.T) {
+	// 分段控件的序号 → 过滤值；越界按「所有」处理。
+	for _, c := range []struct {
+		index  int
+		filter string
+	}{{0, "all"}, {1, "on"}, {2, "off"}, {9, "all"}, {-1, "all"}} {
+		if got := appFilterValue(c.index); got != c.filter {
+			t.Errorf("appFilterValue(%d) = %q, want %q", c.index, got, c.filter)
+		}
+	}
+
 	a := testApp(t)
-	cases := []struct {
+	for _, c := range []struct {
 		filter        string
 		enabled, want bool
 	}{
@@ -497,8 +519,7 @@ func TestAppFilter(t *testing.T) {
 		{"on", false, false},
 		{"off", true, false},
 		{"off", false, true},
-	}
-	for _, c := range cases {
+	} {
 		a.appFilter = c.filter
 		got := true
 		switch a.appFilter {

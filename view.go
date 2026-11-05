@@ -16,6 +16,7 @@ import (
 	"github.com/egoist/mygo/ui"
 
 	"github.com/qy/easyconnect/internal/model"
+	"github.com/qy/easyconnect/internal/store"
 	"github.com/qy/easyconnect/internal/vpn"
 )
 
@@ -153,9 +154,9 @@ func (a *app) appsSection(c *ui.Context) {
 		ui.Text(c, fmt.Sprintf("%d 个", len(all))).FontSize(12).TextColor(t.TextMuted)
 		ui.Row(c).Grow(1)
 		// 只看已启用 / 未启用的应用，排查时不用在 158 个里翻。
-		ui.Select(c, &a.appFilterLabel, []string{"所有", "已启用", "未启用"}).
-			Label("过滤应用").Width(120)
-		a.appFilter = appFilterValue(a.appFilterLabel)
+		ui.Segmented(c, &a.appFilterIndex, "所有", "已启用", "未启用").
+			Label("过滤应用")
+		a.appFilter = appFilterValue(a.appFilterIndex)
 		ui.SearchField(c, &a.appQuery).Placeholder("搜索应用名称、地址或标签").
 			Label("搜索应用").Width(240)
 	})
@@ -924,7 +925,7 @@ func (a *app) pointButtons(c *ui.Context, v vpn.View) {
 		}
 		// Only the WeCom login keeps a session worth discarding by hand: it is
 		// the one where "退出登录" means "sign in as someone else next time".
-		if p := a.cfg.Find(v.ID); canLogout(p) {
+		if p := a.cfg.Find(v.ID); a.canLogout(p) {
 			if ui.Button(c, "退出登录").Label("退出登录 " + v.Name).Clicked() {
 				a.askLogout(v)
 			}
@@ -1069,13 +1070,13 @@ func (a *app) footer(c *ui.Context) {
 		ui.Text(c, "当前版本 "+appBuild).FontSize(10).TextColor(t.TextMuted)
 		if a.update != nil {
 			ui.Row(c).Padding(3, 8).Radius(8).AlignItems(ui.Center).Gap(5).
-				Tooltip("下载 v"+a.update.Version).
+				Tooltip("下载 v" + a.update.Version).
 				OnClick(func() { a.openUpdate() }).Children(func() {
 				ui.Text(c, "新版本 v"+a.update.Version).FontSize(11)
 			})
 		}
 		ui.Row(c).Padding(4).Radius(8).AlignItems(ui.Center).
-			Tooltip("项目主页："+projectURL).
+			Tooltip("项目主页：" + projectURL).
 			OnClick(func() { a.openProject() }).Children(func() {
 			ui.Icon(c, githubIcon).Size(15, 15)
 		})
@@ -1466,11 +1467,24 @@ func (a *app) deleteView(c *ui.Context) {
 	}
 }
 
-// canLogout reports whether "退出登录" is offered for a point. Only the WeCom
-// login leaves a session worth discarding by hand; the other modes either keep
-// a password or a browser session the user manages elsewhere.
-func canLogout(p *model.AccessPoint) bool {
-	return p != nil && model.AuthMode(p.AuthMode) == model.AuthModeWeCom
+// canLogout reports whether "退出登录" is offered for a point: only a login
+// that came from an external page leaves a session worth discarding by hand.
+// That is the WeCom QR login, single sign-on, and the legacy "auto" mode —
+// which, without a stored password, is the WeCom login too. A point that logs
+// in with a password has nothing to discard, so it shows no such button.
+func (a *app) canLogout(p *model.AccessPoint) bool {
+	if p == nil {
+		return false
+	}
+	switch model.AuthMode(p.AuthMode) {
+	case model.AuthModeWeCom, model.AuthModeSSO:
+		return true
+	case model.AuthModeAuto:
+		// 老配置的 auto：有密码就走密码，没有密码才落到企业微信。
+		_, err := a.store.Password(p.ID)
+		return errors.Is(err, store.ErrSecretNotFound)
+	}
+	return false
 }
 
 // askLogout refuses while the global TUN owns the session, then opens the
@@ -2059,12 +2073,13 @@ func hostInTun(points, id string) bool {
 	return false
 }
 
-// appFilterValue maps the dropdown label to the filter used by the list.
-func appFilterValue(label string) string {
-	switch label {
-	case "已启用":
+// appFilterValue maps the segmented control's choice to the filter used by the
+// list: 0 所有, 1 已启用, 2 未启用.
+func appFilterValue(index int) string {
+	switch index {
+	case 1:
 		return "on"
-	case "未启用":
+	case 2:
 		return "off"
 	default:
 		return "all"

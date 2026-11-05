@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
-	"net/url"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,7 +77,7 @@ func (a *app) cdpLoginCallback(ctx context.Context, point *model.AccessPoint, lo
 			if proc.Exited() {
 				return "", errors.New("浏览器已关闭")
 			}
-			logf("浏览器没有响应（%v），改用独立配置目录重试", err)
+			logf("浏览器 18 秒内没有响应（%v），改用临时配置目录重试；这一次不会带上已保存的密码与登录状态", err)
 			proc.Stop()
 			unique := fmt.Sprintf("%s-%d", profile, time.Now().Unix())
 			port, err = cdp.FreePort()
@@ -94,7 +94,7 @@ func (a *app) cdpLoginCallback(ctx context.Context, point *model.AccessPoint, lo
 				return "", fmt.Errorf("连接浏览器失败：%w", err)
 			}
 		}
-		defer proc.Stop()
+		defer stopBrowser(client, proc)
 	} else {
 		// 复用的浏览器不是这次启动的，结束时按记录的进程号关掉。
 		defer closeLoginBrowser(a.dir, point.ID)
@@ -217,6 +217,30 @@ func launchBrowser(exe, profile string, port int, start string) (*browserProc, e
 	return p, nil
 }
 
+// stopBrowser asks the browser to close itself so it flushes its profile —
+// cookies, and the password the user may have just saved — then kills it if it
+// is still there. Killing straight away is why a saved password could disappear
+// between two logins.
+func stopBrowser(client *cdp.Client, proc *browserProc) {
+	if proc == nil {
+		return
+	}
+	if client != nil {
+		// 给「保存密码」的提示条留一点时间：它出现在登录提交之后，
+		// 立刻关窗等于把它一起关掉，下次自然就没有可填的密码。
+		time.Sleep(1500 * time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = client.CloseBrowser(ctx)
+		cancel()
+		select {
+		case <-proc.done:
+			return
+		case <-time.After(3 * time.Second):
+		}
+	}
+	proc.Stop()
+}
+
 // Exited reports whether the browser was closed.
 func (p *browserProc) Exited() bool {
 	select {
@@ -240,9 +264,14 @@ func (p *browserProc) Stop() {
 }
 
 // attachWhenReady waits for the freshly started browser's DevTools endpoint.
+//
+// The budget is generous on purpose: a first start on a cold machine (Windows
+// especially) can take well over ten seconds. Timing out early is not free —
+// the caller then falls back to a throw-away profile, which loses the cookies
+// and saved passwords the user built up in the real one.
 func attachWhenReady(ctx context.Context, port int, host string) (*cdp.Client, error) {
 	var lastErr error
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 60; i++ {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()

@@ -128,6 +128,13 @@ func AttachFor(ctx context.Context, port int, host string) (*Client, error) {
 	return nil, errors.New("浏览器没有可用的页面")
 }
 
+// CloseBrowser asks the browser to shut itself down, which is how it flushes
+// the profile: cookies and a password saved a moment ago land on disk only if
+// the browser exits on its own terms.
+func (c *Client) CloseBrowser(ctx context.Context) error {
+	return c.call(ctx, "Browser.close", nil, nil)
+}
+
 // Close ends the connection, not the browser.
 func (c *Client) Close() error {
 	c.mu.Lock()
@@ -256,7 +263,7 @@ func (c *Client) ContinueRequest(ctx context.Context, requestID string) error {
 // DropRequest lets a paused request fail instead of reaching the server.
 func (c *Client) DropRequest(ctx context.Context, requestID string) error {
 	return c.call(ctx, "Fetch.failRequest", map[string]any{
-		"requestId": requestID,
+		"requestId":   requestID,
 		"errorReason": "Aborted",
 	}, nil)
 }
@@ -277,8 +284,8 @@ func (c *Client) Evaluate(ctx context.Context, expression string, out any) error
 		} `json:"exceptionDetails"`
 	}
 	params := map[string]any{
-		"expression":   expression,
-		"awaitPromise": true,
+		"expression":    expression,
+		"awaitPromise":  true,
 		"returnByValue": true,
 	}
 	if err := c.call(ctx, "Runtime.evaluate", params, &res); err != nil {
