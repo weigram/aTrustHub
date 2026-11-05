@@ -60,3 +60,20 @@ func TestPickResumePoint(t *testing.T) {
 		t.Errorf("没有在线项应返回空：got %q", got)
 	}
 }
+
+// DNS 自检只能问域名：应用地址列表里还有 192.168.168.0/24 这类网段，
+// 拿去解析必然失败，会让守卫误判成「DNS 挂了」。
+func TestIsProbeName(t *testing.T) {
+	good := []string{"gitlab.qctc.com.cn", "access.qctc.com.cn", "a.b"}
+	bad := []string{"", "192.168.168.0/24", "10.18.11.3", "10.20.168.68:5237", "1-65535"}
+	for _, n := range good {
+		if !isProbeName(n) {
+			t.Errorf("%q 应当可以用于探测", n)
+		}
+	}
+	for _, n := range bad {
+		if isProbeName(n) {
+			t.Errorf("%q 不应当用于探测", n)
+		}
+	}
+}

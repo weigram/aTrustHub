@@ -676,20 +676,33 @@ func helperAnswersDNS(wait time.Duration, name string) bool {
 // "localhost" is useless here because the helper answers it from a builtin
 // table even when its tunnel resolution is broken.
 func (a *app) dnsProbeName(id string) string {
+	// 接入点自己的主机名一定能通过它解析，先用它，避不开时就退回应用域名。
+	if p := a.cfg.Find(id); p != nil && isProbeName(p.Server) {
+		return p.Server
+	}
 	for _, entry := range a.allApps() {
 		if entry.PointID != id {
 			continue
 		}
 		for _, addr := range entry.App.Addresses {
-			if addr.Host != "" && net.ParseIP(addr.Host) == nil {
+			if isProbeName(addr.Host) {
 				return addr.Host
 			}
 		}
 	}
-	if p := a.cfg.Find(id); p != nil && p.Server != "" {
-		return p.Server
-	}
 	return "www.baidu.com"
+}
+
+// isProbeName reports whether host is a plain domain name. Address lists also
+// carry ranges like "192.168.168.0/24", which no resolver can answer.
+func isProbeName(host string) bool {
+	if host == "" || net.ParseIP(host) != nil {
+		return false
+	}
+	if strings.ContainsAny(host, "/-:* ") {
+		return false
+	}
+	return strings.Contains(host, ".")
 }
 
 // dnsQueryAnswers sends one A query to 127.0.0.1:53 and waits for any answer.

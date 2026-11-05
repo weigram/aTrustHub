@@ -558,3 +558,23 @@ func TestAppSwitchKeepsState(t *testing.T) {
 		t.Fatal("开关状态没有写回")
 	}
 }
+
+// 企业微信退出登录只清会话，不碰浏览器数据；单点登录才需要连浏览器一起清。
+func TestLogoutTextByMode(t *testing.T) {
+	cases := []struct {
+		mode    model.AuthMode
+		browser bool
+		want    string
+	}{
+		{model.AuthModeWeCom, false, "会清除本地暂存的认证信息，下次登录需要重新认证。"},
+		{model.AuthModeSSO, true, "会清除本地暂存的认证信息与浏览器登录数据（cookie）"},
+	}
+	for _, c := range cases {
+		if got := logoutClearsBrowser(c.mode); got != c.browser {
+			t.Errorf("%s: clearsBrowser = %v, want %v", c.mode, got, c.browser)
+		}
+		if c.browser != (c.mode == model.AuthModeSSO) {
+			t.Errorf("%s: 期望值写错了", c.mode)
+		}
+	}
+}

@@ -378,6 +378,11 @@ func (a *app) wecomStaticQRLogin(ctx context.Context, pointName, server, loginUR
 			return "", err, true
 		default:
 		}
+		// 「本地认证不行，改用浏览器」也是关窗，别把它当成用户取消：
+		// 否则下一次点登录既不开浏览器也不扫码，只能看到「已取消扫码登录」。
+		if wantBrowser.Load() {
+			return "", errWeComLocalUnavailable, true
+		}
 		return "", errLoginCanceled, true
 	case <-winCtx.Done():
 		if wantBrowser.Load() {

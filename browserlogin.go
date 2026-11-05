@@ -58,6 +58,7 @@ func (a *app) cdpLoginCallback(ctx context.Context, point *model.AccessPoint, lo
 	var client *cdp.Client
 	var proc *browserProc
 	var tempProfile string
+	var reused bool
 	// 临时配置目录只是为了绕过被占用的配置文件，用完就删，别越堆越多。
 	// 它注册得比 stopBrowser 早，所以会在浏览器关掉之后才执行。
 	defer func() {
@@ -108,11 +109,20 @@ func (a *app) cdpLoginCallback(ctx context.Context, point *model.AccessPoint, lo
 			}
 		}
 		defer stopBrowser(client, proc)
-	} else {
-		// 复用的浏览器不是这次启动的，结束时按记录的进程号关掉。
-		defer closeLoginBrowser(a.dir, point.ID)
+		reused = true
 	}
 	defer client.Close()
+	if reused {
+		// 复用的浏览器不是这次启动的：先请它自己正常退出（这样 cookie
+		// 能落盘、下次不会弹「未正确关闭」），再按记录的进程号兜底。
+		defer func() {
+			idCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = client.CloseBrowser(idCtx)
+			cancel()
+			time.Sleep(500 * time.Millisecond)
+			closeLoginBrowser(a.dir, point.ID)
+		}()
+	}
 	if err := client.Enable(ctx); err != nil {
 		logf("开启调试域失败：%v", err)
 	}
@@ -217,6 +227,13 @@ func launchBrowser(exe, profile string, port int, start string) (*browserProc, e
 		"--disable-sync",
 		// 自签证书不忽略的话页面停在证书错误上，会话根本建立不起来。
 		"--ignore-certificate-errors",
+		// 这是给自动化用的窗口：不要「恢复页面」气泡，也不要
+		// 「不受支持的命令行标记」提示条挡着登录表单。
+		"--hide-crash-restore-bubble",
+		"--test-type",
+		"--disable-session-crashed-bubble",
+		"--noerrdialogs",
+		"--disable-infobars",
 		start,
 	)
 	if err := cmd.Start(); err != nil {

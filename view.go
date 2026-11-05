@@ -1508,20 +1508,29 @@ func (a *app) logoutView(c *ui.Context) {
 	}
 	t := c.Theme()
 	name := "这个接入点"
-	for _, p := range a.cfg.Points {
-		if p.ID == a.logoutAsk {
-			name = "「" + p.Name + "」"
+	var point *model.AccessPoint
+	for i := range a.cfg.Points {
+		if a.cfg.Points[i].ID == a.logoutAsk {
+			name = "「" + a.cfg.Points[i].Name + "」"
+			point = &a.cfg.Points[i]
 		}
+	}
+	// 只有单点登录的会话存在浏览器里，才需要连浏览器数据一起清掉。
+	usesBrowser := point != nil && model.AuthMode(point.AuthMode) == model.AuthModeSSO
+	body := "退出 " + name + " 会清除本地暂存的认证信息，下次登录需要重新认证。"
+	hint := "如果只是想暂时断开、稍后继续用同一个账号，点「断开」即可，" +
+		"那样下次登录会直接复用这次认证，不用重新扫码。"
+	if usesBrowser {
+		body = "退出 " + name + " 会清除本地暂存的认证信息与浏览器登录数据（cookie），下次登录需要重新认证。"
+		hint = "如果只是想暂时断开、稍后继续用同一个账号，点「断开」即可，" +
+			"那样下次登录会直接复用这次认证，不会重新打开浏览器认证。"
 	}
 	open := a.logoutAsk != ""
 	ui.Modal(c, &open, func() {
 		ui.Column(c).Width(440).Gap(10).Children(func() {
 			ui.Text(c, "退出登录").FontSize(17).Bold()
-			ui.Text(c, "退出 "+name+" 会清除保存的认证信息与浏览器登录数据（cookie），下次登录需要重新认证。").
-				FontSize(12).TextColor(t.Text)
-			ui.Text(c, "如果只是想暂时断开、稍后继续用同一个账号，点「断开」即可，"+
-				"那样下次登录会直接复用这次认证，不会弹二维码。").
-				FontSize(11).TextColor(t.TextMuted)
+			ui.Text(c, body).FontSize(12).TextColor(t.Text)
+			ui.Text(c, hint).FontSize(11).TextColor(t.TextMuted)
 			ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
 				if ui.Button(c, "取消").Clicked() {
 					a.logoutAsk = ""
@@ -1532,9 +1541,11 @@ func (a *app) logoutView(c *ui.Context) {
 					a.logoutAsk = ""
 					go func() {
 						a.mgr.Logout(id)
-						// 单点登录的浏览器里还留着身份提供方的会话，
-						// 不清掉的话下次打开浏览器又会自动登录回同一个账号。
-						a.clearBrowserLoginProfile(id)
+						// 企业微信的认证不在浏览器里，清配置目录反而会丢掉
+						// 有用的东西；只有单点登录需要连浏览器会话一起清。
+						if p := a.cfg.Find(id); p != nil && logoutClearsBrowser(model.AuthMode(p.AuthMode)) {
+							a.clearBrowserLoginProfile(id)
+						}
 					}()
 					a.toast = "已退出登录，下次登录需要重新认证"
 				}
@@ -2089,4 +2100,11 @@ func appFilterValue(index int) string {
 	default:
 		return "all"
 	}
+}
+
+// logoutClearsBrowser reports whether discarding a login must also wipe the
+// browser data. Only single sign-on keeps its session in a browser; the WeCom
+// login lives in the app's own window and its files are not worth touching.
+func logoutClearsBrowser(mode model.AuthMode) bool {
+	return mode == model.AuthModeSSO
 }
