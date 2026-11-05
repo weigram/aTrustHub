@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,7 +32,7 @@ const version = "0.1.0"
 // app is everything the window shows and the manager that does the work.
 // appBuild is shown in the footer and the startup log so an old running
 // instance is easy to tell apart from a freshly built one.
-const appBuild = "0.26.14"
+const appBuild = "0.26.15"
 
 type app struct {
 	win   *mygo.Window
@@ -40,7 +41,9 @@ type app struct {
 	bus   *vpn.LogBus
 	cfg   model.Config
 	dir   string
-	icon  ui.ImageSource
+	// keepAlive 记住每个隧道连续探测失败的次数。
+	keepAlive tunKeepAlive
+	icon      ui.ImageSource
 	// qr is the running WeCom QR login drawn in the main window, if any.
 	// (qr field removed: WeCom QR login uses a WebView popup now.)
 	// sysProxyOn is whether the app turned the macOS system proxy on.
@@ -401,6 +404,8 @@ func (a *app) start() {
 		dnsFails := 0
 		for range time.Tick(3 * time.Second) {
 			a.maybeRefreshTUN()
+			a.checkTunnels()
+			a.guardSystemProxy()
 			// TUN 把系统 DNS 指向自己；它一旦不应答，整台机器就上不了网。
 			// 连续两次检查失败就主动关掉 TUN，把网络还给系统。
 			if a.tunOn && time.Since(lastDNSCheck) > 20*time.Second {
@@ -477,16 +482,10 @@ func (a *app) shutdown() {
 		// A real quit: window closes must go through, or macOS cancels the
 		// termination and the process stays alive with no usable UI.
 		a.quitRequested = true
-		if a.tunOn {
-			a.stopTUNQuiet()
-			a.tunOn = false
-		}
-		// Leaving the system proxy pointed at a dead port would cut the
-		// machine off, so turn it back off before quitting.
-		if a.sysProxyOn {
-			_ = applySystemProxy("127.0.0.1:0", false)
-			a.sysProxyOn = false
-		}
+		// 退出时两件事必须做到：TUN 的 utun/路由/DNS 全部还原，系统代理关掉。
+		// 否则用户下次开机就是「没网」，而且看不出是谁干的。
+		a.teardownTUNOnExit()
+		a.disableSystemProxyOnExit()
 		if a.mgr != nil {
 			a.mgr.Close()
 		}
@@ -662,6 +661,27 @@ func (a *app) describeProgress() string {
 	}
 }
 
+// guardSystemProxy turns the system proxy back off when the unified entry it
+// points at is no longer listening. Leaving it on would cut the whole machine
+// off, which is worse than losing the VPN.
+func (a *app) guardSystemProxy() {
+	if !a.sysProxyOn {
+		return
+	}
+	agg := a.mgr.Aggregate()
+	if agg.Running && agg.Addr != "" {
+		if conn, err := net.DialTimeout("tcp", agg.Addr, 1500*time.Millisecond); err == nil {
+			_ = conn.Close()
+			return
+		}
+	}
+	_ = applySystemProxy("127.0.0.1:0", false)
+	a.sysProxyOn = false
+	a.sysProxySwitch = false
+	a.tunLogf("统一入口已停止监听，已自动关闭系统代理以恢复网络")
+	a.win.Update(func() { a.toast = "统一入口已停止，已自动关闭系统代理" })
+}
+
 // firstPointID returns the first id of a comma-joined snapshot.
 func firstPointID(snapshot string) string {
 	for _, id := range strings.Split(snapshot, ",") {
@@ -670,4 +690,45 @@ func firstPointID(snapshot string) string {
 		}
 	}
 	return ""
+}
+
+// teardownTUNOnExit stops the helper, makes sure the system DNS is not left
+// pointing at 127.0.0.1, and clears the control files.
+func (a *app) teardownTUNOnExit() {
+	pidPath := filepath.Join(a.dir, "tun.pid")
+	_, pidErr := os.Stat(pidPath)
+	if !a.tunOn && pidErr != nil && a.tunPID <= 0 {
+		// 没开过 TUN，但上一次可能被强杀留下了 DNS 劫持，仍然兜底一次。
+		a.cleanupStaleDNS()
+		return
+	}
+	// 给 helper 足够时间自己退出：它会在退出前把 DNS 交还系统。
+	if !a.shutdownHelper(6 * time.Second) {
+		a.tunLogf("退出：helper 未在 6 秒内退出，强制结束后重置 DNS")
+	}
+	// helper 被强杀时来不及恢复 DNS，这里再兜底一次。
+	a.cleanupStaleDNS()
+	a.tunOn = false
+	a.tunPID = 0
+	for _, name := range []string{"tun.stop", "tun.pid", "tun.reload", "tun.probe", "tun.probe.result"} {
+		_ = os.Remove(filepath.Join(a.dir, name))
+	}
+	a.tunLogf("退出：TUN 已清理，DNS 已交还系统")
+}
+
+// disableSystemProxyOnExit turns the system proxy off before quitting, retrying
+// once because a failed revert leaves the machine with no usable network.
+func (a *app) disableSystemProxyOnExit() {
+	if !a.sysProxyOn {
+		return
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := applySystemProxy("127.0.0.1:0", false); err == nil {
+			a.sysProxyOn = false
+			a.tunLogf("退出：已关闭系统代理")
+			return
+		} else {
+			a.tunLogf("退出：关闭系统代理失败（第 %d 次）：%v", attempt+1, err)
+		}
+	}
 }

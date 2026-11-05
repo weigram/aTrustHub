@@ -62,7 +62,11 @@ func (a *app) view(c *ui.Context) {
 		case 2:
 			a.accessSection(c)
 		default:
-			a.aggregateCard(c)
+			// 系统代理没开时，统一入口没有参与任何转发，整块隐藏；
+			// 需要手动配置端口时在「设置」里看。
+			if a.sysProxyOn {
+				a.aggregateCard(c)
+			}
 			a.pointsSection(c)
 		}
 		if a.logsOpen {
@@ -716,7 +720,8 @@ func (a *app) header(c *ui.Context) {
 				a.sysProxySwitch = a.sysProxyOn
 				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 					ui.Text(c, "系统代理").FontSize(13).TextColor(t.Text)
-					ui.Switch(c, &a.sysProxySwitch).Disabled(!agg.Running)
+					// TUN 接管时应用侧代理已经停了，再把系统指过去就是整机没网。
+					ui.Switch(c, &a.sysProxySwitch).Disabled(!agg.Running || a.tunOn)
 				})
 				if a.sysProxySwitch != a.sysProxyOn {
 					a.toggleSystemProxy()
@@ -1258,6 +1263,11 @@ func (a *app) editorView(c *ui.Context) {
 			ui.Field(c, "名称", func() {
 				ui.TextInput(c, &d.name).Placeholder("例如：主网关 / 教育网线路")
 			})
+			// 接入地址先填，检测按钮紧跟着它，点检测时地址已经在上方。
+			ui.Field(c, "接入地址", func() {
+				ui.TextInput(c, &d.address).
+					Placeholder("例如：https://vpn.example.com:443").Grow(1)
+			})
 			ui.Row(c).Gap(10).AlignItems(ui.End).Children(func() {
 				ui.Field(c, "认证方式", func() {
 					ui.Select(c, &d.authModeLabel, authModeLabels()).Width(220)
@@ -1280,10 +1290,6 @@ func (a *app) editorView(c *ui.Context) {
 				ui.Text(c, "服务器支持："+strings.Join(d.detected, "、")).FontSize(11).
 					TextColor(t.TextMuted)
 			}
-			ui.Field(c, "接入地址", func() {
-				ui.TextInput(c, &d.address).
-					Placeholder("例如：https://vpn.example.com:443").Grow(1)
-			})
 			switch d.authMode {
 			case string(model.AuthModeWeCom):
 				// 企业微信：登录域用来在服务器提供多个外部登录时挑一个。
@@ -1909,10 +1915,24 @@ func (a *app) firstOnlinePoint() string {
 }
 
 func (a *app) toggleSystemProxy() {
+	if a.tunOn && !a.sysProxyOn {
+		a.toast = "全局 TUN 已经接管流量，先关掉 TUN 再用系统代理"
+		a.sysProxySwitch = a.sysProxyOn
+		return
+	}
 	agg := a.mgr.Aggregate()
 	if !agg.Running || agg.Addr == "" {
 		a.toast = "统一入口还没启动"
+		a.sysProxySwitch = a.sysProxyOn
 		return
+	}
+	// 先确认代理端口真的在监听：指到一个没人听的端口会让整台机器断网。
+	if conn, err := net.DialTimeout("tcp", agg.Addr, 2*time.Second); err != nil {
+		a.toast = "统一入口没有在监听，先别开系统代理"
+		a.sysProxySwitch = a.sysProxyOn
+		return
+	} else {
+		_ = conn.Close()
 	}
 	port := agg.Addr
 	if i := strings.LastIndex(port, ":"); i >= 0 {

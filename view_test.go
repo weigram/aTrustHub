@@ -90,10 +90,20 @@ func TestEmptyView(t *testing.T) {
 	a := testApp(t)
 	tt := ui.NewTester(a.view, 1120, 800)
 	texts := strings.Join(tt.Texts(), "|")
-	for _, want := range []string{"aTrust Hub", "统一入口", "还没有接入点", "添加第一个接入点"} {
+	for _, want := range []string{"aTrust Hub", "还没有接入点", "添加第一个接入点"} {
 		if !strings.Contains(texts, want) {
 			t.Errorf("view lacks %q; texts = %s", want, texts)
 		}
+	}
+	// 系统代理没开时统一入口整块隐藏：它不参与任何转发。
+	if strings.Contains(texts, "统一入口") {
+		t.Errorf("系统代理关闭时不该显示统一入口；texts = %s", texts)
+	}
+
+	a.sysProxyOn = true
+	on := strings.Join(ui.NewTester(a.view, 1120, 800).Texts(), "|")
+	if !strings.Contains(on, "统一入口") {
+		t.Errorf("系统代理开启后应当显示统一入口；texts = %s", on)
 	}
 }
 
@@ -131,6 +141,27 @@ func TestEditorDropsAutoAuthMode(t *testing.T) {
 	}
 	if strings.Contains(texts, "自动识别") {
 		t.Errorf("自动识别 should be gone; texts = %s", texts)
+	}
+}
+
+func TestEditorAddressAboveAuthMode(t *testing.T) {
+	// The address is what 检测 reads, so it sits above the auth row.
+	a := testApp(t)
+	tt := ui.NewTester(a.view, 1120, 800)
+	if err := tt.Click("＋ 添加接入点"); err != nil {
+		t.Fatalf("click add: %v", err)
+	}
+	tt.Frame()
+	addr, ok := tt.Find("接入地址")
+	if !ok {
+		t.Fatal("editor lacks 接入地址")
+	}
+	auth, ok := tt.Find("认证方式")
+	if !ok {
+		t.Fatal("editor lacks 认证方式")
+	}
+	if addr.Y >= auth.Y {
+		t.Errorf("接入地址 y=%.0f should be above 认证方式 y=%.0f", addr.Y, auth.Y)
 	}
 }
 
