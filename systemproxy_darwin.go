@@ -85,3 +85,7 @@ func applySystemProxy(hostPort string, on bool) error {
 	}
 	return nil
 }
+
+// applySystemProxyFn is the seam tests use: unit tests must never touch the
+// real system settings (that would hang on a password prompt in CI).
+var applySystemProxyFn = applySystemProxy

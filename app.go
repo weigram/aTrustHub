@@ -32,7 +32,7 @@ const version = "0.1.0"
 // app is everything the window shows and the manager that does the work.
 // appBuild is shown in the footer and the startup log so an old running
 // instance is easy to tell apart from a freshly built one.
-const appBuild = "0.26.15"
+const appBuild = "0.26.16"
 
 type app struct {
 	win   *mygo.Window
@@ -675,11 +675,12 @@ func (a *app) guardSystemProxy() {
 			return
 		}
 	}
-	_ = applySystemProxy("127.0.0.1:0", false)
+	_ = applySystemProxyFn("127.0.0.1:0", false)
 	a.sysProxyOn = false
 	a.sysProxySwitch = false
 	a.tunLogf("统一入口已停止监听，已自动关闭系统代理以恢复网络")
-	a.win.Update(func() { a.toast = "统一入口已停止，已自动关闭系统代理" })
+	a.toast = "统一入口已停止，已自动关闭系统代理"
+	a.invalidate()
 }
 
 // firstPointID returns the first id of a comma-joined snapshot.
@@ -723,7 +724,7 @@ func (a *app) disableSystemProxyOnExit() {
 		return
 	}
 	for attempt := 0; attempt < 2; attempt++ {
-		if err := applySystemProxy("127.0.0.1:0", false); err == nil {
+		if err := applySystemProxyFn("127.0.0.1:0", false); err == nil {
 			a.sysProxyOn = false
 			a.tunLogf("退出：已关闭系统代理")
 			return

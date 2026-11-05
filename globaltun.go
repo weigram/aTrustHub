@@ -220,7 +220,7 @@ func (a *app) startGlobalTUN(id string) {
 	a.tunLogf("startGlobalTUN: %d 个接入点，配置 %s", len(cfg.Points), cfgPath)
 
 	if a.sysProxyOn {
-		_ = applySystemProxy("127.0.0.1:0", false)
+		_ = applySystemProxyFn("127.0.0.1:0", false)
 		a.sysProxyOn = false
 	}
 	logPath := filepath.Join(a.dir, "tun.log")

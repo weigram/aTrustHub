@@ -60,3 +60,7 @@ $t = Add-Type -MemberDefinition $sig -Name WinINet -Namespace Native -PassThru
 `
 	_ = newCmd("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script).Run()
 }
+
+// applySystemProxyFn is the seam tests use, so a unit test never rewrites the
+// machine's real proxy settings.
+var applySystemProxyFn = applySystemProxy

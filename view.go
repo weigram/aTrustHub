@@ -1943,7 +1943,7 @@ func (a *app) toggleSystemProxy() {
 	a.toast = "正在修改系统代理，请授权…"
 	a.invalidate()
 	go func() {
-		err := applySystemProxy(target, on)
+		err := applySystemProxyFn(target, on)
 		a.win.Update(func() {
 			if err != nil {
 				a.toast = "系统代理设置失败：" + err.Error()

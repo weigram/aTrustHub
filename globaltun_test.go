@@ -103,6 +103,11 @@ func TestKeepAliveCounts(t *testing.T) {
 // 系统代理只在统一入口确实在监听时才允许存在：TUN 接管或端口死了都必须关掉，
 // 否则整机断网。
 func TestSystemProxyGuards(t *testing.T) {
+	// 单元测试不能碰真实系统设置：CI 上会卡在管理员密码弹窗。
+	orig := applySystemProxyFn
+	applySystemProxyFn = func(string, bool) error { return nil }
+	t.Cleanup(func() { applySystemProxyFn = orig })
+
 	a := testApp(t)
 
 	// TUN 开启时，开关不接受打开。
