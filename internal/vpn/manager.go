@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -101,8 +102,8 @@ type View struct {
 	InPool      bool
 	AutoConnect bool
 
-	State  State
-	Error  string
+	State State
+	Error string
 	// MonitorOn, MonitorInterval, Alive and AliveErr describe the session
 	// validity check of this point.
 	MonitorOn       bool
@@ -110,11 +111,18 @@ type View struct {
 	Alive           string
 	AliveAt         int64
 	AliveErr        string
-	ClientIP   string
-	DNSServer  string
-	NodeGroups []string
-	BestNodes  map[string]string
-	Apps       []App
+	// Tunnel is the health of the data path, from the idle business probe:
+	// "" (not probed), "degraded" (a probe failed) or "dead" (the tunnel is
+	// being rebuilt). It is separate from Alive: a login can stay valid while
+	// the tunnel no longer carries traffic.
+	TunnelState string
+	TunnelErr   string
+	TunnelFails int
+	ClientIP    string
+	DNSServer   string
+	NodeGroups  []string
+	BestNodes   map[string]string
+	Apps        []App
 
 	Active int64
 	Total  int64
@@ -156,11 +164,11 @@ type Manager struct {
 
 	// dataDir is where saved sessions live, used to probe a login whose
 	// tunnel is owned by the TUN helper.
-	dataDir string
+	dataDir    string
 	healthStop chan struct{}
 	// monitorStop ends the session validity loop.
 	monitorStop chan struct{}
-	healthWG   sync.WaitGroup
+	healthWG    sync.WaitGroup
 
 	started bool
 	closed  bool
@@ -184,8 +192,20 @@ type endpoint struct {
 	latencyNS atomic.Int64
 	// login is how long the current login took.
 	login time.Duration
-	// probeFails counts consecutive health probes that failed.
-	probeFails int
+	// Tunnel health, maintained by the idle business probe (probeAll). It is
+	// kept apart from the session state: a valid login with a dead tunnel is
+	// exactly what the probe is meant to catch.
+	tunnelState string
+	tunnelErr   string
+	tunnelFails int
+	// tunnelRebuilds counts automatic rebuilds since the tunnel last proved
+	// healthy, so a tunnel that dies immediately cannot be rebuilt forever.
+	tunnelRebuilds int
+	// lastTraffic is the last time this point carried a real connection, so
+	// probes only run while the tunnel is idle. lastProbe throttles the probe
+	// itself (and speeds up retries after a failure).
+	lastTraffic time.Time
+	lastProbe   time.Time
 	// tunServed means the global TUN owns this point's tunnel and the GUI has
 	// handed its own session over.
 	tunServed bool
@@ -205,12 +225,12 @@ type endpoint struct {
 // read secrets. notify runs after every state change, and may be nil.
 func NewManager(connector Connector, creds CredentialFunc, bus *LogBus, notify func()) *Manager {
 	m := &Manager{
-		points:     map[string]*endpoint{},
-		settings:   model.DefaultSettings(),
-		connector:  connector,
-		creds:      creds,
-		bus:        bus,
-		notify:     notify,
+		points:      map[string]*endpoint{},
+		settings:    model.DefaultSettings(),
+		connector:   connector,
+		creds:       creds,
+		bus:         bus,
+		notify:      notify,
 		healthStop:  make(chan struct{}),
 		monitorStop: make(chan struct{}),
 	}
@@ -333,6 +353,9 @@ func (m *Manager) stopEndpointLocked(id string, closes *[]closeLater) {
 	ep.state = StateOffline
 	ep.errMsg = ""
 	ep.info = SessionInfo{}
+	ep.tunnelState = ""
+	ep.tunnelErr = ""
+	ep.tunnelFails = 0
 	if ep.cancel != nil {
 		ep.cancel()
 		ep.cancel = nil
@@ -417,6 +440,10 @@ func (m *Manager) Views() []View {
 			MonitorInterval: ep.cfg.MonitorIntervalSeconds(),
 			Alive:           ep.aliveState,
 			AliveErr:        ep.aliveErr,
+
+			TunnelState: ep.tunnelState,
+			TunnelErr:   ep.tunnelErr,
+			TunnelFails: ep.tunnelFails,
 		}
 		if !ep.aliveAt.IsZero() {
 			v.AliveAt = ep.aliveAt.Unix()
@@ -538,7 +565,11 @@ func (m *Manager) connect(id string, gen int) {
 	var p *proxy.Server
 	if cfg.SocksPort > 0 {
 		p, err = m.newProxy(cfg, ep, func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return sess.Dial(ctx, network, addr)
+			conn, derr := sess.Dial(ctx, network, addr)
+			if derr == nil {
+				m.noteTraffic(id)
+			}
+			return conn, derr
 		})
 		if err != nil {
 			_ = sess.Close()
@@ -563,7 +594,10 @@ func (m *Manager) connect(id string, gen int) {
 	cur.state = StateOnline
 	cur.errMsg = ""
 	cur.info = sess.Info()
-	cur.probeFails = 0
+	cur.tunnelState = ""
+	cur.tunnelErr = ""
+	cur.tunnelFails = 0
+	cur.lastTraffic = time.Now()
 	// A fresh login starts the validity report from scratch.
 	cur.aliveFails = 0
 	cur.aliveRetryAt = time.Time{}
@@ -970,6 +1004,7 @@ func (m *Manager) Dial(ctx context.Context, network, addr string) (net.Conn, err
 		}
 		conn, err := dial(ctx, network, addr)
 		if err == nil {
+			m.noteTraffic(c.id)
 			m.recordSuccess(c.id, time.Since(start))
 			m.logAccess(host, addr, c)
 			return conn, nil
@@ -1401,11 +1436,17 @@ func (m *Manager) SetTunServed(ids []string) {
 			ep.tunServed = true
 			ep.aliveState = "由 TUN 接管"
 			ep.aliveErr = ""
+			ep.tunnelState = ""
+			ep.tunnelErr = ""
+			ep.tunnelFails = 0
 		case !want && ep.tunServed:
 			// TUN no longer carries it: log in again so the point gets its
 			// own tunnel back (a fresh proxy is created with that session).
 			ep.tunServed = false
 			ep.aliveState = ""
+			ep.tunnelState = ""
+			ep.tunnelErr = ""
+			ep.tunnelFails = 0
 			if ep.state == StateOnline {
 				reconnect = append(reconnect, id)
 			}
@@ -1521,7 +1562,7 @@ func (m *Manager) markInvalid(id, msg string, autoReconnect bool) {
 	m.logf("[%s] %s", name, msg)
 	m.changed()
 	if autoReconnect {
-		m.retryLogin(id)
+		m.retryLogin(id, "会话失效")
 	}
 }
 
@@ -1534,7 +1575,7 @@ var loginRetryDelays = []time.Duration{
 
 // retryLogin logs in again after a takeover, backing off so a failing server
 // is not hammered.
-func (m *Manager) retryLogin(id string) {
+func (m *Manager) retryLogin(id, why string) {
 	m.mu.Lock()
 	ep := m.points[id]
 	if ep == nil || m.closed {
@@ -1550,8 +1591,13 @@ func (m *Manager) retryLogin(id string) {
 		return
 	}
 	delay := loginRetryDelays[step]
-	m.logf("[%s] 会话失效，%s 后自动重新登录（第 %d/%d 次）",
-		name, delay.Round(time.Second), step+1, len(loginRetryDelays))
+	// A dead tunnel is worth rebuilding quickly; a taken-over session waits a
+	// little longer so two clients do not keep kicking each other.
+	if why == "隧道失效" && step == 0 {
+		delay = 5 * time.Second
+	}
+	m.logf("[%s] %s，%s 后自动重新登录（第 %d/%d 次）",
+		name, why, delay.Round(time.Second), step+1, len(loginRetryDelays))
 	m.reconnectAfter(id, delay)
 }
 
@@ -1559,12 +1605,11 @@ func (m *Manager) healthLoop() {
 	defer m.healthWG.Done()
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
-	last := time.Time{}
 	for {
 		select {
 		case <-m.healthStop:
 			return
-		case now := <-ticker.C:
+		case <-ticker.C:
 			m.mu.RLock()
 			interval := m.settings.HealthIntervalSec
 			auto := m.settings.AutoReconnect
@@ -1572,33 +1617,65 @@ func (m *Manager) healthLoop() {
 			if interval <= 0 {
 				continue
 			}
-			if !last.IsZero() && now.Sub(last) < time.Duration(interval)*time.Second {
-				continue
-			}
-			last = now
+			// probeAll applies the per-point idle gate and retries a failed
+			// probe sooner, so a dead tunnel is found in about half a minute
+			// instead of three intervals.
 			m.probeAll(auto)
 		}
 	}
 }
 
+// probeAll runs the idle business probe. A point is only probed when it has
+// not carried a real connection for one health interval, so a busy tunnel is
+// never charged for a probe it does not need. The probe dials an address of
+// the point's own applications, which is what the tunnel exists for and what
+// keeps the aTrust session active; only points without a usable address fall
+// back to the tunnel's DNS.
 func (m *Manager) probeAll(autoReconnect bool) {
 	type probe struct {
 		id     string
 		name   string
 		sess   Session
 		target string
+		useDNS bool
 	}
 	var probes []probe
+	idleAfter := time.Duration(0)
 	m.mu.RLock()
+	if m.settings.HealthIntervalSec > 0 {
+		idleAfter = time.Duration(m.settings.HealthIntervalSec) * time.Second
+	}
 	for _, id := range m.order {
 		ep := m.points[id]
 		if ep == nil || ep.state != StateOnline || ep.sess == nil {
 			continue
 		}
-		if _, ok := ep.sess.(Prober); !ok && ep.info.HealthTarget == "" {
-			continue
+		// A tunnel that just carried traffic is demonstrably alive; probing it
+		// only adds load and noise. A tunnel that already failed is retried
+		// quickly, so a dead one is noticed in seconds rather than minutes.
+		if ep.tunnelFails > 0 {
+			if time.Since(ep.lastProbe) < 10*time.Second {
+				continue
+			}
+		} else {
+			if !ep.lastTraffic.IsZero() && time.Since(ep.lastTraffic) < idleAfter {
+				continue
+			}
+			if time.Since(ep.lastProbe) < idleAfter {
+				continue
+			}
 		}
-		probes = append(probes, probe{id: id, name: ep.cfg.Name, sess: ep.sess, target: ep.info.HealthTarget})
+		target := keepAliveTarget(ep.info.Apps)
+		useDNS := false
+		if target == "" {
+			if _, ok := ep.sess.(Prober); !ok {
+				continue
+			}
+			useDNS = true
+		}
+		probes = append(probes, probe{
+			id: id, name: ep.cfg.Name, sess: ep.sess, target: target, useDNS: useDNS,
+		})
 	}
 	m.mu.RUnlock()
 
@@ -1608,36 +1685,187 @@ func (m *Manager) probeAll(autoReconnect bool) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
-			err := probeSession(ctx, p.sess, p.target)
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			var err error
+			if p.useDNS {
+				err = p.sess.(Prober).Probe(ctx)
+			} else {
+				err = probeSession(ctx, p.sess, p.target)
+				// An application can be down while the tunnel is fine. The
+				// remote DNS lookup proves the tunnel itself, so only both
+				// failing is a failure.
+				if err != nil {
+					if prober, ok := p.sess.(Prober); ok {
+						dnsCtx, dnsCancel := context.WithTimeout(context.Background(), 6*time.Second)
+						if prober.Probe(dnsCtx) == nil {
+							err = nil
+						}
+						dnsCancel()
+					}
+				}
+			}
 			cancel()
-			if err == nil {
-				m.mu.Lock()
-				if ep := m.points[p.id]; ep != nil {
-					ep.probeFails = 0
-				}
-				m.mu.Unlock()
-				return
-			}
-			dead := false
-			name := p.name
-			m.mu.Lock()
-			if ep := m.points[p.id]; ep != nil && ep.state == StateOnline {
-				ep.probeFails++
-				if ep.probeFails >= 3 && autoReconnect {
-					dead = true
-				}
-			}
-			m.mu.Unlock()
-			if dead {
-				m.logf("[%s] 连续三次健康检查失败，重新登录", name)
-				m.Disconnect(p.id)
-				m.reconnectAfter(p.id, 5*time.Second)
-			}
+
+			m.recordProbe(p.id, p.name, err, autoReconnect)
 		}()
 	}
 	wg.Wait()
 }
+
+// recordProbe applies one probe result. A failed probe never touches the
+// login: the session came from the portal and can stay valid while the tunnel
+// is gone, so the point is marked and then rebuilt from that session.
+func (m *Manager) recordProbe(id, name string, err error, autoReconnect bool) {
+	m.mu.Lock()
+	if ep := m.points[id]; ep != nil {
+		ep.lastProbe = time.Now()
+	}
+	m.mu.Unlock()
+	if errors.Is(err, errProbeUnavailable) {
+		// This point has nothing to probe through the tunnel (no application
+		// address and no remote DNS). That is not a failure.
+		return
+	}
+
+	m.mu.Lock()
+	ep := m.points[id]
+	if ep == nil || ep.state != StateOnline {
+		m.mu.Unlock()
+		return
+	}
+	if err == nil {
+		wasBad := ep.tunnelState != "" || ep.tunnelErr != "" || ep.tunnelFails != 0
+		ep.tunnelState = ""
+		ep.tunnelErr = ""
+		ep.tunnelFails = 0
+		ep.tunnelRebuilds = 0
+		m.mu.Unlock()
+		if wasBad {
+			m.changed()
+		}
+		return
+	}
+	ep.tunnelFails++
+	fails := ep.tunnelFails
+	ep.tunnelState = "degraded"
+	ep.tunnelErr = err.Error()
+	dead := fails >= 3 && autoReconnect
+	m.mu.Unlock()
+
+	if !dead {
+		m.logf("[%s] 隧道保活探测失败（%d/3）：%v", name, fails, err)
+		m.changed()
+		return
+	}
+	m.markTunnelDead(id, fmt.Sprintf("隧道保活连续失败 %d 次：%v", fails, err))
+}
+
+// markTunnelDead takes a point whose login still works but whose tunnel does
+// not, marks it, and rebuilds the tunnel from the saved session.
+func (m *Manager) markTunnelDead(id, reason string) {
+	var closes []closeLater
+	m.mu.Lock()
+	ep := m.points[id]
+	if ep == nil || ep.state != StateOnline {
+		m.mu.Unlock()
+		return
+	}
+	name := ep.cfg.Name
+	// stopEndpointLocked resets the tunnel marker, so set it afterwards.
+	m.stopEndpointLocked(id, &closes)
+	ep.tunnelRebuilds++
+	rebuilds := ep.tunnelRebuilds
+	ep.state = StateError
+	ep.errMsg = "隧道已失效（登录仍有效），正在重新建立隧道…"
+	ep.tunnelState = "dead"
+	ep.tunnelErr = reason
+	ep.tunnelFails = 0
+	if rebuilds > 3 {
+		ep.errMsg = "隧道已失效（登录仍有效），但已连续重建 3 次仍未恢复；请检查网络或手动重新登录"
+	}
+	m.mu.Unlock()
+
+	for _, c := range closes {
+		if c.proxy != nil {
+			_ = c.proxy.Close()
+		}
+		if c.sess != nil {
+			_ = c.sess.Close()
+		}
+	}
+	m.logf("[%s] %s；重建隧道（第 %d 次）", name, reason, rebuilds)
+	m.changed()
+	if rebuilds > 3 {
+		m.logf("[%s] 已连续自动重建 %d 次仍失败，停止自动重试", name, rebuilds)
+		return
+	}
+	m.retryLogin(id, "隧道失效")
+}
+
+// SetTunnelState lets a caller that owns the tunnel (the global TUN helper)
+// publish its health without touching the login state.
+func (m *Manager) SetTunnelState(id, state, msg string) {
+	m.mu.Lock()
+	ep := m.points[id]
+	changed := false
+	if ep != nil && (ep.tunnelState != state || ep.tunnelErr != msg) {
+		ep.tunnelState = state
+		ep.tunnelErr = msg
+		if state == "" {
+			ep.tunnelFails = 0
+		}
+		changed = true
+	}
+	m.mu.Unlock()
+	if changed {
+		m.changed()
+	}
+}
+
+// noteTraffic records that a point just carried a real connection, which both
+// postpones its next probe and proves the tunnel alive.
+func (m *Manager) noteTraffic(id string) {
+	m.mu.Lock()
+	if ep := m.points[id]; ep != nil {
+		ep.lastTraffic = time.Now()
+		// Real traffic proves the tunnel works, so the rebuild budget starts
+		// over.
+		ep.tunnelRebuilds = 0
+	}
+	m.mu.Unlock()
+}
+
+// keepAliveTarget returns one address of this point's own applications as
+// host:port, preferring an IPv4 literal so the probe exercises the tunnel
+// without needing a name lookup.
+func keepAliveTarget(apps []App) string {
+	for _, app := range apps {
+		for _, addr := range app.Addresses {
+			host := strings.TrimSpace(addr.Host)
+			if host == "" || strings.ContainsAny(host, "/-") || net.ParseIP(host) == nil {
+				continue
+			}
+			if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+				continue
+			}
+			// A missing port means "all ports"; there is no single address to
+			// probe, so leave it to the DNS fallback.
+			if strings.TrimSpace(addr.Port) == "" {
+				continue
+			}
+			for _, port := range portsFor(addr.Port) {
+				if port > 0 {
+					return net.JoinHostPort(host, strconv.Itoa(port))
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// errProbeUnavailable means this point offers no way to probe the tunnel, so
+// the result must not be counted as a failure.
+var errProbeUnavailable = errors.New("tunnel probe unavailable")
 
 // AliveStatus is what a session reports about its login still being valid on
 // the server side.

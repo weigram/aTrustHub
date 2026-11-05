@@ -11,8 +11,8 @@ package main
 import (
 	"context"
 	"encoding/binary"
-	"strings"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -149,6 +150,7 @@ func main() {
 	guiPID := flag.Int("gui-pid", 0, "exit when this process is gone")
 	guiFile := flag.String("gui-file", "", "exit when this heartbeat file goes stale")
 	reloadFile := flag.String("reload-file", "", "re-read the config when this file appears")
+	probeFile := flag.String("probe-file", "", "answer tunnel probes written here")
 	flag.Parse()
 	if *cfgPath == "" {
 		fatal("-config is required")
@@ -244,6 +246,13 @@ func main() {
 				reloadConfig(*cfgPath, hub)
 			}
 		}()
+	}
+
+	// Probe requests let the GUI test a tunnel for real: a local dial only
+	// completes the handshake in the TUN stack and says nothing about whether
+	// the aTrust session still carries traffic.
+	if *probeFile != "" {
+		go serveProbes(*probeFile, hub)
 	}
 
 	// Keep the system pointed at our resolver: the aTrust stack's DNS setup
@@ -417,6 +426,87 @@ func (l *accessLogger) log(target string, port int, ok bool) {
 	}
 	_, _ = f.WriteString(rec + "\n")
 	_ = f.Close()
+}
+
+// probeResult is what the GUI reads back from a probe.
+type probeResult struct {
+	ID    string `json:"id"`
+	OK    bool   `json:"ok"`
+	MS    int64  `json:"ms"`
+	Error string `json:"error,omitempty"`
+	// Skip marks a target this helper cannot test (only TCP-tunnel resources
+	// can be probed), so the caller does not count it as a failure.
+	Skip bool `json:"skip,omitempty"`
+}
+
+// serveProbes answers one probe at a time: the request file carries
+// "<id>|<point name>|<host:port>", the answer goes to "<file>.result".
+func serveProbes(path string, h *hub) {
+	resultPath := path + ".result"
+	for {
+		time.Sleep(200 * time.Millisecond)
+		raw, err := os.ReadFile(path)
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		_ = os.Remove(path)
+		parts := strings.SplitN(strings.TrimSpace(string(raw)), "|", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		res := answerProbe(h, parts[0], parts[1], parts[2])
+		b, err := json.Marshal(res)
+		if err != nil {
+			continue
+		}
+		_ = os.WriteFile(resultPath, b, 0o644)
+	}
+}
+
+// answerProbe dials through the named point's own stack, so the result is
+// about the aTrust tunnel rather than the local TUN device, which completes
+// every handshake by itself.
+func answerProbe(h *hub, id, name, addr string) probeResult {
+	res := probeResult{ID: id}
+	start := time.Now()
+	h.mu.Lock()
+	p := h.points[name]
+	h.mu.Unlock()
+	if p == nil {
+		res.Error = "接入点未在运行"
+		return res
+	}
+	host, portText, err := net.SplitHostPort(addr)
+	if err != nil {
+		res.Error = "地址无效：" + err.Error()
+		return res
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		res.Error = "保活探测只支持 IP 地址"
+		return res
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port <= 0 || port > 65535 {
+		res.Error = "端口无效"
+		return res
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	conn, err := p.stack.DialTCP(ctx, &net.TCPAddr{IP: ip, Port: port})
+	if err != nil {
+		if errors.Is(err, client.ErrResourceNotFound) {
+			res.Skip = true
+			res.Error = "该地址不走 TCP 隧道，无法用连接探测"
+			return res
+		}
+		res.Error = err.Error()
+		return res
+	}
+	_ = conn.Close()
+	res.OK = true
+	res.MS = time.Since(start).Milliseconds()
+	return res
 }
 
 // rangePrefixes returns the minimal CIDR blocks covering [lo, hi].

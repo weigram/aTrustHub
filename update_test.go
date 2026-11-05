@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -73,5 +74,29 @@ func TestMirrorPrefixFormat(t *testing.T) {
 	}
 	if !strings.HasPrefix(ghMirrorPrefix, "https://") {
 		t.Fatal("镜像前缀应是 https")
+	}
+}
+
+// 启动时 DNS 还没通，请求会在解析阶段就失败——这不代表 GitHub 被封。
+func TestIsResolveError(t *testing.T) {
+	yes := []string{
+		`Get "https://api.github.com/x": dial tcp: lookup api.github.com: no such host`,
+		`lookup gh-proxy.com: no such host`,
+		`server misbehaving`,
+	}
+	no := []string{
+		`Get "https://api.github.com/x": dial tcp 1.2.3.4:443: i/o timeout`,
+		`HTTP 403`,
+		`connection refused`,
+	}
+	for _, m := range yes {
+		if !isResolveError(errors.New(m)) {
+			t.Errorf("应当识别为解析失败：%s", m)
+		}
+	}
+	for _, m := range no {
+		if isResolveError(errors.New(m)) {
+			t.Errorf("不该识别为解析失败：%s", m)
+		}
 	}
 }

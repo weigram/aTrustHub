@@ -243,6 +243,7 @@ func (a *app) startGlobalTUN(id string) {
 		"-stop-file", stopPath,
 		"-gui-file", guiPath,
 		"-reload-file", filepath.Join(a.dir, "tun.reload"),
+		"-probe-file", filepath.Join(a.dir, "tun.probe"),
 	}
 	privileged := true
 	if err := a.ensureHelperPrivilege(helper, args); err != nil {
@@ -314,6 +315,7 @@ func (a *app) startGlobalTUN(id string) {
 		a.tunMirror()
 	})
 	succeeded = true
+	a.keepAlive.reset()
 	// The helper owns the tunnel now: the point's own proxy must dial through
 	// the system, or the two tunnels would fight over one session. Read the
 	// online set directly: a.tunPoints is written by the queued win.Update
@@ -534,6 +536,7 @@ func (a *app) stopGlobalTUN() {
 		}
 	})
 	a.persistTunState(false, "")
+	a.keepAlive.reset()
 }
 
 // startGUIHeartbeat keeps the helper's "the app is alive" file fresh, so the
@@ -610,7 +613,7 @@ func (a *app) stopTUNQuiet() {
 // tunnel. TUN completes the TCP handshake locally, so a plain dial reports
 // success in a couple of milliseconds even when nothing is reachable; only the
 // helper can tell the truth.
-func (a *app) probeTunnel(pointName, addr string, wait time.Duration) (bool, int64, string, bool) {
+func (a *app) probeTunnel(pointName, addr string, wait time.Duration) (bool, int64, string, bool, bool) {
 	a.probeMu.Lock()
 	defer a.probeMu.Unlock()
 	reqPath := filepath.Join(a.dir, "tun.probe")
@@ -618,7 +621,7 @@ func (a *app) probeTunnel(pointName, addr string, wait time.Duration) (bool, int
 	id := fmt.Sprintf("%d", time.Now().UnixNano())
 	_ = os.Remove(resPath)
 	if err := os.WriteFile(reqPath, []byte(id+"|"+pointName+"|"+addr), 0o600); err != nil {
-		return false, 0, "", false
+		return false, 0, "", false, false
 	}
 	deadline := time.Now().Add(wait)
 	for time.Now().Before(deadline) {
@@ -629,17 +632,18 @@ func (a *app) probeTunnel(pointName, addr string, wait time.Duration) (bool, int
 				OK    bool   `json:"ok"`
 				MS    int64  `json:"ms"`
 				Error string `json:"error"`
+				Skip  bool   `json:"skip"`
 			}
 			if json.Unmarshal(data, &out) == nil && out.ID == id {
 				_ = os.Remove(resPath)
-				return out.OK, out.MS, out.Error, true
+				return out.OK, out.MS, out.Error, true, out.Skip
 			}
 			time.Sleep(80 * time.Millisecond)
 			continue
 		}
 		time.Sleep(80 * time.Millisecond)
 	}
-	return false, 0, "", false
+	return false, 0, "", false, false
 }
 
 // pickResumePoint chooses which access point the remembered TUN should use:

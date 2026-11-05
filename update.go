@@ -59,21 +59,25 @@ func (a *app) checkForUpdate() {
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	var failures []string
+	noHost := 0
 	for i, url := range releaseSources() {
 		direct := i == 0
 		info, err := fetchLatest(ctx, client, url)
 		if err != nil {
+			if isResolveError(err) {
+				noHost++
+			}
 			failures = append(failures, shortHost(url)+": "+err.Error())
 			continue
 		}
 		if info == nil {
 			continue
 		}
-		// 直达 GitHub 成功，说明浏览器也打得开；否则后面的镜像都可用，
-		// 那么「GitHub 图标」也应当跳到镜像上，否则点了是白屏。
+		// 直达 GitHub 成功，说明浏览器也打得开；靠镜像才成功时，
+		// 「GitHub 图标」也应当跳到镜像上，否则点了是白屏。
 		a.markGitHubReach(direct)
 		if !versionGreater(info.Version, appBuild) {
-			a.noteUpdate("已是最新版本 "+appBuild+"（来源 "+info.Source+"）")
+			a.noteUpdate("已是最新版本 " + appBuild + "（来源 " + info.Source + "）")
 			return
 		}
 		a.win.Update(func() {
@@ -83,7 +87,19 @@ func (a *app) checkForUpdate() {
 		a.noteUpdate(fmt.Sprintf("发现新版本 v%s（当前 v%s，来源 %s）", info.Version, appBuild, info.Source))
 		return
 	}
-	a.noteUpdate("检查更新失败：" + strings.Join(failures, " ｜ "))
+	if noHost == len(failures) {
+		a.noteUpdate("检查更新失败：这台机器暂时解析不了域名（刚启动时常见），90 秒后重试")
+	} else {
+		a.noteUpdate("检查更新失败：" + strings.Join(failures, " ｜ "))
+	}
+	// 启动时我们刚把系统 DNS 还回去，第一次查询常常还没通。别就此放弃，
+	// 一分钟后再试一次——总失败时也说明不了 GitHub 不可达，图标仍按直连。
+	if a.updateRetried.CompareAndSwap(false, true) {
+		time.AfterFunc(90*time.Second, func() {
+			a.noteUpdate("重试检查更新")
+			a.checkForUpdate()
+		})
+	}
 }
 
 // markGitHubReach remembers whether github.com itself answered, which decides
@@ -269,4 +285,17 @@ func (a *app) openUpdate() {
 	if err := mygo.Shell.OpenExternal(a.githubPage(url)); err != nil {
 		a.toast = "打不开下载页：" + err.Error()
 	}
+}
+
+// isResolveError reports whether a request failed before reaching the host,
+// which says nothing about GitHub being blocked — it usually means the machine
+// has no working DNS yet.
+func isResolveError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no such host") ||
+		strings.Contains(msg, "lookup ") ||
+		strings.Contains(msg, "server misbehaving")
 }

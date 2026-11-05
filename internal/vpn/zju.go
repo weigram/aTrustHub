@@ -310,7 +310,10 @@ func (s *zjuSession) Probe(ctx context.Context) error {
 		return errors.New("接入点已断开")
 	}
 	if !s.probe {
-		return nil
+		// No remote DNS server is published by this gateway, so a DNS lookup
+		// cannot tell us anything about the tunnel. Report it as unavailable
+		// instead of "healthy": a no-op probe used to hide a dead tunnel.
+		return errProbeUnavailable
 	}
 	var firstErr error
 	try := func(r *net.Resolver) bool {

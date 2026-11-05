@@ -534,8 +534,8 @@ func (a *app) probeHostText(id, host string, ports []int) string {
 		if point := a.cfg.Find(id); point != nil {
 			for _, p := range ports {
 				addr := net.JoinHostPort(host, strconv.Itoa(p))
-				ok, ms, errText, answered := a.probeTunnel(point.Name, addr, 2*time.Second)
-				if !answered {
+				ok, ms, errText, answered, skip := a.probeTunnel(point.Name, addr, 2*time.Second)
+				if !answered || skip {
 					return a.directProbeText(id, host, ports)
 				}
 				if ok {
@@ -870,6 +870,24 @@ func (a *app) pointCard(c *ui.Context, v vpn.View) {
 
 		if v.State == vpn.StateError && v.Error != "" {
 			ui.Text(c, v.Error).FontSize(12).TextColor(t.Danger)
+		}
+		// A dead tunnel with a valid login looks "online" everywhere else, so
+		// the probe result needs its own line.
+		if v.TunnelState != "" && v.State != vpn.StateError {
+			colour := t.Warning
+			label := "隧道保活探测失败"
+			if v.TunnelFails > 0 {
+				label += "（" + strconv.Itoa(v.TunnelFails) + " 次）"
+			}
+			if v.TunnelState == "dead" {
+				colour = t.Danger
+				label = "隧道已失效（登录仍有效），正在重建"
+			}
+			text := label
+			if v.TunnelErr != "" {
+				text += "：" + v.TunnelErr
+			}
+			ui.Text(c, text).FontSize(12).TextColor(colour).Ellipsis("…")
 		}
 		summary := vpn.NodeSummary(v)
 		showMonitor := v.State == vpn.StateOnline && v.MonitorOn

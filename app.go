@@ -48,7 +48,8 @@ type app struct {
 	// (qr field removed: WeCom QR login uses a WebView popup now.)
 	// ghReachable records whether github.com answered the update check; the
 	// footer icon sends the browser to a mirror when it did not.
-	ghReachable bool
+	ghReachable   bool
+	updateRetried atomic.Bool
 	// sysProxyOn is whether the app turned the macOS system proxy on.
 	sysProxyOn bool
 	// tray is the notification-area icon that keeps the app alive when the
@@ -443,7 +444,12 @@ func (a *app) start() {
 	a.setupMenu()
 	// Desktop quick-login diagnostics go to the same log the user reads.
 	wecomLogHook = func(line string) { a.bus.Add("app", line) }
-	go a.checkForUpdate()
+	a.ghReachable = true
+	// 稍等一下再查：启动时刚把系统 DNS 还回去，立刻查询多半还没通。
+	go func() {
+		time.Sleep(8 * time.Second)
+		a.checkForUpdate()
+	}()
 
 	// Make sure the first window is on screen even if the remembered state or
 	// an early activation left it hidden.
