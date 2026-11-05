@@ -32,7 +32,7 @@ const version = "0.1.0"
 // app is everything the window shows and the manager that does the work.
 // appBuild is shown in the footer and the startup log so an old running
 // instance is easy to tell apart from a freshly built one.
-const appBuild = "0.26.16"
+const appBuild = "0.26.17"
 
 type app struct {
 	win   *mygo.Window
@@ -46,6 +46,9 @@ type app struct {
 	icon      ui.ImageSource
 	// qr is the running WeCom QR login drawn in the main window, if any.
 	// (qr field removed: WeCom QR login uses a WebView popup now.)
+	// ghReachable records whether github.com answered the update check; the
+	// footer icon sends the browser to a mirror when it did not.
+	ghReachable bool
 	// sysProxyOn is whether the app turned the macOS system proxy on.
 	sysProxyOn bool
 	// tray is the notification-area icon that keeps the app alive when the

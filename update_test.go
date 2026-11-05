@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestVersionGreater(t *testing.T) {
 	cases := []struct {
@@ -45,5 +48,30 @@ func TestParseManifest(t *testing.T) {
 	}
 	if _, err := parseManifest(`{}`, "u"); err == nil {
 		t.Fatal("缺版本号应报错")
+	}
+}
+
+// GitHub 打不开时，图标和下载链接都要走镜像，否则点了是白屏。
+func TestGitHubPageUsesMirror(t *testing.T) {
+	a := testApp(t)
+	a.ghReachable = true
+	if got := a.githubPage("https://github.com/x/y"); got != "https://github.com/x/y" {
+		t.Errorf("直连可用时不该改地址，得到 %s", got)
+	}
+
+	a.ghReachable = false
+	want := ghMirrorPrefix + "https://github.com/x/y"
+	if got := a.githubPage("https://github.com/x/y"); got != want {
+		t.Errorf("直连不可用时应走镜像，得到 %s，期望 %s", got, want)
+	}
+}
+
+// 镜像地址本身要能被 gh-proxy 正确代理：前缀 + 完整地址。
+func TestMirrorPrefixFormat(t *testing.T) {
+	if !strings.HasSuffix(ghMirrorPrefix, "/") {
+		t.Fatal("镜像前缀应以 / 结尾，才能直接拼接完整地址")
+	}
+	if !strings.HasPrefix(ghMirrorPrefix, "https://") {
+		t.Fatal("镜像前缀应是 https")
 	}
 }

@@ -18,6 +18,10 @@ const projectRepo = "weigram/aTrustHub"
 // projectURL is the repository home page, opened by the footer icon.
 const projectURL = "https://github.com/" + projectRepo
 
+// ghMirrorPrefix is the mirror that serves github.com pages when the direct
+// site is unreachable (the office network blocks it).
+const ghMirrorPrefix = "https://gh-proxy.com/"
+
 // updateInfo describes a release newer than this build.
 type updateInfo struct {
 	Version string // without the leading "v"
@@ -55,7 +59,8 @@ func (a *app) checkForUpdate() {
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	var failures []string
-	for _, url := range releaseSources() {
+	for i, url := range releaseSources() {
+		direct := i == 0
 		info, err := fetchLatest(ctx, client, url)
 		if err != nil {
 			failures = append(failures, shortHost(url)+": "+err.Error())
@@ -64,6 +69,9 @@ func (a *app) checkForUpdate() {
 		if info == nil {
 			continue
 		}
+		// 直达 GitHub 成功，说明浏览器也打得开；否则后面的镜像都可用，
+		// 那么「GitHub 图标」也应当跳到镜像上，否则点了是白屏。
+		a.markGitHubReach(direct)
 		if !versionGreater(info.Version, appBuild) {
 			a.noteUpdate("已是最新版本 "+appBuild+"（来源 "+info.Source+"）")
 			return
@@ -76,6 +84,28 @@ func (a *app) checkForUpdate() {
 		return
 	}
 	a.noteUpdate("检查更新失败：" + strings.Join(failures, " ｜ "))
+}
+
+// markGitHubReach remembers whether github.com itself answered, which decides
+// where the footer icon sends the browser.
+func (a *app) markGitHubReach(direct bool) {
+	if a.win != nil {
+		a.win.Update(func() { a.ghReachable = direct })
+	} else {
+		a.ghReachable = direct
+	}
+	if !direct {
+		a.noteUpdate("github.com 直连不可用，链接改走镜像 " + ghMirrorPrefix)
+	}
+}
+
+// githubPage returns a github.com page URL that this machine can open: the
+// mirror prefix is added when the direct site did not answer.
+func (a *app) githubPage(url string) string {
+	if a.ghReachable {
+		return url
+	}
+	return ghMirrorPrefix + url
 }
 
 // noteUpdate records the outcome in the app log without alarming the user.
@@ -224,7 +254,7 @@ func shortHost(url string) string {
 
 // openProject opens the repository page in the default browser.
 func (a *app) openProject() {
-	if err := mygo.Shell.OpenExternal(projectURL); err != nil {
+	if err := mygo.Shell.OpenExternal(a.githubPage(projectURL)); err != nil {
 		a.toast = "打不开 GitHub：" + err.Error()
 	}
 }
@@ -236,7 +266,7 @@ func (a *app) openUpdate() {
 	if a.update != nil && a.update.URL != "" {
 		url = a.update.URL
 	}
-	if err := mygo.Shell.OpenExternal(url); err != nil {
+	if err := mygo.Shell.OpenExternal(a.githubPage(url)); err != nil {
 		a.toast = "打不开下载页：" + err.Error()
 	}
 }
