@@ -3,6 +3,7 @@ package main
 import (
 	"os/exec"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -105,8 +106,18 @@ func unixWeComPorts() []int {
 	if err != nil {
 		return nil
 	}
+	return lsofWeComPorts(string(raw))
+}
+
+// lsofWeComPorts keeps the listening sockets of the desktop client.
+//
+// lsof prints COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME, so the
+// address with the port is the second-to-last field, not the eighth: the
+// eighth is the NODE column ("TCP"), which is why reading it never found a
+// port at all.
+func lsofWeComPorts(out string) []int {
 	ports := make([]int, 0, 8)
-	for _, line := range strings.Split(string(raw), "\n") {
+	for _, line := range strings.Split(out, "\n") {
 		lower := strings.ToLower(line)
 		if !strings.Contains(lower, "wecom") && !strings.Contains(lower, "wxwork") {
 			continue
@@ -115,12 +126,41 @@ func unixWeComPorts() []int {
 		if len(fields) < 9 {
 			continue
 		}
-		addr := fields[8]
-		if i := strings.LastIndex(addr, ":"); i >= 0 {
-			if p, err := strconv.Atoi(addr[i+1:]); err == nil {
+		name := fields[len(fields)-1]
+		if strings.HasPrefix(name, "(") { // "(LISTEN)"
+			if len(fields) < 10 {
+				continue
+			}
+			name = fields[len(fields)-2]
+		}
+		if i := strings.LastIndex(name, ":"); i >= 0 {
+			if p, err := strconv.Atoi(name[i+1:]); err == nil {
 				ports = append(ports, p)
 			}
 		}
 	}
+	return ports
+}
+
+// orderDiscovered puts the ports the client is known to prefer first and the
+// rest after it. When the preferred port was taken and the client moved, the
+// new port is then tried right after the old one instead of behind every
+// internal service the client also listens on.
+func orderDiscovered(ports []int) []int {
+	rank := func(p int) int {
+		switch {
+		case p >= 50010 && p <= 50013:
+			return 0
+		case p >= 50000 && p <= 50002:
+			return 1
+		default:
+			return 2
+		}
+	}
+	// Equal ranks keep the order the system listed them in: it is the only
+	// ordering that carries information, and guesses are not worth it.
+	sort.SliceStable(ports, func(i, j int) bool {
+		return rank(ports[i]) < rank(ports[j])
+	})
 	return ports
 }

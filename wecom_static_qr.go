@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/egoist/mygo"
@@ -80,7 +81,9 @@ func wecomStaticHTML(title, instruction string, png []byte, showLocalBtn bool) s
 	b64 := base64.StdEncoding.EncodeToString(png)
 	btn := ""
 	if showLocalBtn {
-		btn = `<a id="local" href="#local" onclick="location.hash='local';return false;">本地企业微信认证</a>`
+		// 每次点击写一个不同的 hash：下面的看门狗拿它和上一次比，才能把
+		// 「再点一次」和「上一次点击」分开。
+		btn = `<a id="local" href="#local" onclick="try{location.hash='local-'+(new Date().getTime())}catch(e){};return false;">本地企业微信认证</a>`
 	}
 	return `<!doctype html><html><head><meta charset="utf-8">` +
 		`<style>` +
@@ -169,13 +172,16 @@ func openStaticQRWindow(ctx context.Context, title, instruction string, png []by
 	win.Show()
 	win.Focus()
 
-	// Watch for the "本地企业微信认证" button. The button sets location.hash
-	// to "#local"; polling that tiny string once a second is negligible on
-	// this script-free page and cannot freeze the app.
+	// Watch for the "本地企业微信认证" button. Every click writes a fresh
+	// "#local-<时间戳>", so one attempt is told from the next: a fixed
+	// "#local" would make the button work only once per window. Polling that
+	// tiny string is negligible on this script-free page and cannot freeze
+	// the app, so a failed attempt can be retried without closing the window.
 	if showLocalBtn && onLocalLogin != nil {
 		go func() {
-			ticker := time.NewTicker(time.Second)
+			ticker := time.NewTicker(700 * time.Millisecond)
 			defer ticker.Stop()
+			last := ""
 			for {
 				select {
 				case <-done:
@@ -192,10 +198,12 @@ func openStaticQRWindow(ctx context.Context, title, instruction string, png []by
 				if err != nil {
 					continue
 				}
-				if h, ok := raw.(string); ok && strings.Contains(h, "local") {
-					go onLocalLogin(say)
-					return
+				token, ok := clickToken(raw)
+				if !ok || token == last {
+					continue
 				}
+				last = token
+				go onLocalLogin(say)
 			}
 		}()
 	}
@@ -252,8 +260,11 @@ func (a *app) wecomStaticQRLogin(ctx context.Context, pointName, server, loginUR
 	// Poll the status from Go. Scanning the QR drives the same endpoint, so
 	// the scan path needs nothing else. The desktop "免扫码" path is started
 	// only when the user clicks the button, below.
+	// 桥客户端由轮询和点击共用：点击找到端口后，轮询里补发的确认请求
+	// 才会用同一个目标与同一份 cookie。
+	bridge := &bridgeClient{}
 	go func() {
-		cb, _, err := a.pollWeComLogin(ctx, pointName, server, loginURL, settings, false, 0, logLine)
+		cb, _, err := a.pollWeComLogin(ctx, pointName, server, loginURL, settings, bridge, logLine)
 		if err != nil {
 			errCh <- err
 		} else {
@@ -266,25 +277,43 @@ func (a *app) wecomStaticQRLogin(ctx context.Context, pointName, server, loginUR
 		}
 	}()
 
-	// The "本地企业微信认证" button: detect the desktop client and ask it to
-	// confirm (免扫码). Scanning still works at any time.
+	// The "本地企业微信认证" button: find the desktop client and ask it to
+	// confirm (免扫码). Scanning still works at any time, and the button keeps
+	// working after a failed attempt, so the client can be started and tried
+	// again without closing the window.
+	var localBusy atomic.Bool
 	onLocalLogin := func(say func(string)) {
+		if !localBusy.CompareAndSwap(false, true) {
+			say("正在查找电脑版企业微信，请稍候…")
+			return
+		}
+		defer localBusy.Store(false)
+
 		say("正在查找电脑版企业微信…")
-		ports := wecomDesktopPorts(append(append([]int{}, settings.HTTPSPorts...), 50010, 50011, 50012, 50013))
-		port, desktop := wecomDesktopState(ctx, ports, loginURL, settings.RedirectURI)
-		if !desktop {
-			logLine("未检测到电脑企业微信（已尝试端口 %v），请在手机企业微信扫码登录", ports)
-			say("未检测到电脑版企业微信，请在手机上扫码（先打开企业微信客户端可免扫码）")
-			return
+		targets := bridgeTargets(settings)
+		probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		probe := bridge.probe(probeCtx, targets, loginURL, settings.RedirectURI)
+		switch {
+		case probe.loggedIn:
+			logLine("检测到电脑企业微信（%s），发送确认请求", probe.target)
+			say("已找到电脑版企业微信，请在企业微信里点「确认登录」")
+			if _, err := bridge.bind(ctx, loginURL, settings.ClientKey); err != nil {
+				logLine("发送确认请求失败：%v", err)
+				say("发送确认请求失败：" + err.Error())
+				return
+			}
+			logLine("已请求电脑企业微信确认，请在企业微信里点「确认登录」")
+		case probe.reachable:
+			logLine("电脑版企业微信有响应但没有登录（%s）：%s", probe.target, probe.summary())
+			say("电脑版企业微信没有登录：先在客户端登录再点一次，或直接用手机扫码")
+		case probe.reject != "":
+			logLine("电脑版企业微信拒绝了请求（%s）：%s", probe.rejectTarget, probe.reject)
+			say("电脑版企业微信拒绝了本地请求，请改用手机扫码")
+		default:
+			logLine("未检测到电脑企业微信（%d 个目标）：%s", len(targets), probe.summary())
+			say("未检测到电脑版企业微信，请在手机上扫码（先打开并登录企业微信客户端可免扫码）")
 		}
-		logLine("检测到电脑企业微信（端口 %d），发送确认请求", port)
-		say("已找到电脑版企业微信，请在弹出的窗口点击确认")
-		if err := wecomBindWeCom(ctx, port, loginURL, settings.ClientKey); err != nil {
-			logLine("发送确认请求失败：%v", err)
-			say("发送确认请求失败：" + err.Error())
-			return
-		}
-		logLine("已请求电脑企业微信确认，请在企业微信里点「确认登录」")
 	}
 
 	winErr := openStaticQRWindow(ctx, "企业微信扫码登录 — "+pointName, instruction, png, true, onLocalLogin, done, func() {
@@ -469,4 +498,20 @@ func (a *app) pollQyWechatStatic(ctx context.Context, pointName, server string, 
 		logLine("手机已确认，收到扫码回调")
 		return callback, nil
 	}
+}
+
+// clickToken reports whether the page's location.hash is a click of the
+// "本地企业微信认证" button and returns that click's token. Each click writes a
+// fresh "#local-<时间戳>", which is what lets the watcher tell a new attempt
+// from the one it already handled.
+func clickToken(raw any) (string, bool) {
+	s, ok := raw.(string)
+	if !ok {
+		return "", false
+	}
+	s = strings.TrimPrefix(strings.TrimSpace(s), "#")
+	if !strings.HasPrefix(s, "local-") || len(s) <= len("local-") {
+		return "", false
+	}
+	return s, true
 }
