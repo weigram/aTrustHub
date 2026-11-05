@@ -47,12 +47,13 @@ jobs:
           - os: windows-latest
             platform: windows/amd64
             artifact: windows-amd64
-          - os: windows-latest
-            platform: windows/386
-            artifact: windows-386
-          - os: windows-latest
-            platform: windows/arm64
-            artifact: windows-arm64
+          # 暂时停用：这两个产物先不发布，恢复时去掉注释即可。
+          # - os: windows-latest
+          #   platform: windows/386
+          #   artifact: windows-386
+          # - os: windows-latest
+          #   platform: windows/arm64
+          #   artifact: windows-arm64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
