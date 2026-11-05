@@ -82,17 +82,13 @@ func fetchQyWechat(ctx context.Context, loginURL string) (qyWechatSettings, []by
 // no JavaScript, no external resource and no polling in the page: the login
 // is driven entirely from Go, so the WebView can never freeze on the page's
 // own scripts.
-func wecomStaticHTML(title, instruction string, png []byte, showLocalBtn, showBrowserBtn bool) string {
+func wecomStaticHTML(title, instruction string, png []byte, showLocalBtn bool) string {
 	b64 := base64.StdEncoding.EncodeToString(png)
 	btn := ""
 	if showLocalBtn {
 		// 每次点击写一个不同的 hash：下面的看门狗拿它和上一次比，才能把
 		// 「再点一次」和「上一次点击」分开。
 		btn = `<a id="local" href="#local" onclick="try{location.hash='local-'+(new Date().getTime())}catch(e){};return false;">本地企业微信认证</a>`
-	}
-	if showBrowserBtn {
-		// 客户端只对浏览器开放本地桥时，这条路是唯一能走通的。
-		btn += `<a id="browser" href="#browser" onclick="try{location.hash='browser-'+(new Date().getTime())}catch(e){};return false;">改用浏览器完成</a>`
 	}
 	return `<!doctype html><html><head><meta charset="utf-8">` +
 		`<style>` +
@@ -107,9 +103,6 @@ func wecomStaticHTML(title, instruction string, png []byte, showLocalBtn, showBr
 		`#local{display:inline-block;margin-top:6px;padding:9px 18px;border-radius:8px;` +
 		`background:#1769e0;color:#fff;font-size:13px;text-decoration:none;cursor:pointer;}` +
 		`#local:hover{background:#1257bd;}` +
-		`#browser{display:inline-block;margin-top:2px;padding:7px 14px;border-radius:8px;` +
-		`border:1px solid #d5d9e0;color:#444;font-size:12px;text-decoration:none;cursor:pointer;}` +
-		`#browser:hover{border-color:#1769e0;color:#1769e0;}` +
 		`</style></head><body><div class="wrap">` +
 		`<h1>` + html.EscapeString(title) + `</h1>` +
 		`<img alt="二维码" src="data:image/png;base64,` + b64 + `">` +
@@ -124,7 +117,7 @@ func wecomStaticHTML(title, instruction string, png []byte, showLocalBtn, showBr
 // shows a "本地企业微信认证" button that, clicked, calls onLocalLogin (the
 // desktop quick-login path). The window itself never reports the login
 // result; the caller's poller does.
-func openStaticQRWindow(ctx context.Context, title, instruction string, png []byte, showLocalBtn bool, onLocalLogin, onBrowserLogin func(say func(string)), done <-chan struct{}, onClose func()) error {
+func openStaticQRWindow(ctx context.Context, title, instruction string, png []byte, showLocalBtn bool, onLocalLogin func(say func(string)), done <-chan struct{}, onClose func()) error {
 	win := mygo.NewWindow(mygo.WindowOptions{
 		Title:           title,
 		Width:           360,
@@ -177,7 +170,7 @@ func openStaticQRWindow(ctx context.Context, title, instruction string, png []by
 			}
 		}
 	})
-	page.LoadHTML(wecomStaticHTML(title, instruction, png, showLocalBtn, onBrowserLogin != nil), "")
+	page.LoadHTML(wecomStaticHTML(title, instruction, png, showLocalBtn), "")
 	// Activate the app first: a new window created while the app is in the
 	// background can open behind other apps, which looks like nothing happened.
 	mygo.App.Focus()
@@ -215,12 +208,6 @@ func openStaticQRWindow(ctx context.Context, title, instruction string, png []by
 					continue
 				}
 				last = token
-				if strings.HasPrefix(token, "browser-") {
-					if onBrowserLogin != nil {
-						go onBrowserLogin(say)
-					}
-					continue
-				}
 				go onLocalLogin(say)
 			}
 		}()
@@ -366,15 +353,7 @@ func (a *app) wecomStaticQRLogin(ctx context.Context, pointName, server, loginUR
 		}
 	}
 
-	// 「改用浏览器完成」：关掉这个窗口，由 externalLogin 交给真实浏览器。
-	onBrowserLogin := func(say func(string)) {
-		logLine("按要求改用系统浏览器完成登录")
-		say("正在打开浏览器…")
-		wantBrowser.Store(true)
-		stopWin()
-	}
-
-	winErr := openStaticQRWindow(winCtx, "企业微信扫码登录 — "+pointName, instruction, png, true, onLocalLogin, onBrowserLogin, done, func() {
+	winErr := openStaticQRWindow(winCtx, "企业微信扫码登录 — "+pointName, instruction, png, true, onLocalLogin, done, func() {
 		select {
 		case userClosed <- struct{}{}:
 		default:
@@ -448,7 +427,7 @@ func (a *app) qywechatStaticQRLogin(ctx context.Context, pointName, server, logi
 	}()
 
 	instruction := "请使用手机企业微信扫描二维码，并在手机上点「确认登录」。"
-	winErr := openStaticQRWindow(ctx, "企业微信扫码登录 — "+pointName, instruction, qrPNG, false, nil, nil, done, func() {
+	winErr := openStaticQRWindow(ctx, "企业微信扫码登录 — "+pointName, instruction, qrPNG, false, nil, done, func() {
 		select {
 		case userClosed <- struct{}{}:
 		default:
@@ -571,10 +550,8 @@ func clickToken(raw any) (string, bool) {
 		return "", false
 	}
 	s = strings.TrimPrefix(strings.TrimSpace(s), "#")
-	for _, prefix := range []string{"local-", "browser-"} {
-		if strings.HasPrefix(s, prefix) && len(s) > len(prefix) {
-			return s, true
-		}
+	if !strings.HasPrefix(s, "local-") || len(s) <= len("local-") {
+		return "", false
 	}
-	return "", false
+	return s, true
 }

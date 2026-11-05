@@ -233,8 +233,7 @@ func TestClickToken(t *testing.T) {
 	}{
 		{"#local-1699999999", "local-1699999999", true},
 		{"#local-1", "local-1", true},
-		{"#browser-1699999999", "browser-1699999999", true},
-		{"#browser-", "", false},
+		{"#browser-1699999999", "", false},
 		{"", "", false},
 		{"#local", "", false},
 		{"#local-", "", false},
@@ -449,21 +448,18 @@ func TestBridgeTargetsOrderAndSweep(t *testing.T) {
 	}
 }
 
-// 页面要有两个入口，且浏览器入口只在允许兜底时出现。
+// 页面只保留一个入口：失败后自动交给浏览器，不再让用户点第二次。
 func TestWeComStaticHTMLEntries(t *testing.T) {
 	png := []byte{0x89, 0x50, 0x4e, 0x47}
-	local := wecomStaticHTML("标题", "说明", png, true, false)
-	if !strings.Contains(local, `id="local"`) {
+	page := wecomStaticHTML("标题", "说明", png, true)
+	if !strings.Contains(page, `id="local"`) {
 		t.Fatal("缺少本地认证入口")
 	}
-	if strings.Contains(local, `id="browser"`) {
-		t.Fatal("没有浏览器兜底时不该出现浏览器入口")
+	if strings.Contains(page, `id="browser"`) || strings.Contains(page, "改用浏览器") {
+		t.Fatal("不应再有浏览器按钮")
 	}
-	both := wecomStaticHTML("标题", "说明", png, true, true)
-	if !strings.Contains(both, `id="browser"`) {
-		t.Fatal("缺少浏览器兜底入口")
-	}
-	if !strings.Contains(both, "location.hash='browser-'") {
-		t.Fatal("浏览器入口要写自己的 hash 前缀")
+	plain := wecomStaticHTML("标题", "说明", png, false)
+	if strings.Contains(plain, `id="local"`) {
+		t.Fatal("不需要入口时不该出现按钮")
 	}
 }
