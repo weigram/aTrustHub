@@ -41,6 +41,7 @@ type SetupOptions struct {
 	ServerPort               int
 	LoginMethod              auth.LoginMethod
 	TOTPSecret               string
+	PromptCode               auth.CodePrompter
 	ClientData               []byte
 	ResourceData             []byte
 	BestNodesRefreshInterval time.Duration
@@ -457,6 +458,7 @@ func (c *Client) Setup(options SetupOptions) ([]byte, error) {
 			DeviceID:   c.DeviceID,
 			Cookies:    clientAuthData.Cookies,
 			TOTPSecret: options.TOTPSecret,
+			PromptCode: options.PromptCode,
 		})
 		if err != nil {
 			log.Println("Login error:", err)

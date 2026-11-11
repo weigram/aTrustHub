@@ -45,9 +45,7 @@ func (s *Session) loginAuthSmsCheckCode(phone, loginDomain, graphCodeFile string
 		return err
 	}
 
-	code := ""
-	log.Print("Please enter the SMS verification code: ")
-	_, err = fmt.Scanln(&code)
+	code, err := s.askCode(CodeRequest{Kind: CodeSMS})
 	if err != nil {
 		return err
 	}

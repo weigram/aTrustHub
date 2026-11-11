@@ -23,12 +23,45 @@ func TestSMSCheckCodeWithoutConsole(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	var asked CodeRequest
 	s := &Session{client: srv.Client(), baseURL: srv.URL}
+	s.promptCode = func(req CodeRequest) (string, error) {
+		asked = req
+		return "654321", nil
+	}
 	if _, err := s.smsCheckCode(authStep{SMSMode: smsWithoutAuthID}); err != nil {
 		t.Fatalf("login died at the SMS prompt: %v", err)
 	}
+	if asked.Kind != CodeSMS {
+		t.Errorf("prompter asked for kind %d, want %d", asked.Kind, CodeSMS)
+	}
 	if got := <-posted; got != "654321" {
 		t.Fatalf("gateway got code %q, want 654321", got)
+	}
+}
+
+// The prompt carries what the server said when it sent the SMS.
+func TestSMSAskCarriesTip(t *testing.T) {
+	tip := "验证码已发送到您的手机：138****0000, 请查收！"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"code":0,"message":"发送成功","data":{"tips":"` + tip + `"}}`))
+	}))
+	defer srv.Close()
+
+	var asked CodeRequest
+	s := &Session{client: srv.Client(), baseURL: srv.URL}
+	s.promptCode = func(req CodeRequest) (string, error) {
+		asked = req
+		return "654321", nil
+	}
+	if err := s.authSms(authStep{SMSMode: smsWithoutAuthID}); err != nil {
+		t.Fatalf("authSms: %v", err)
+	}
+	if _, err := s.smsCheckCode(authStep{SMSMode: smsWithoutAuthID}); err != nil {
+		t.Fatalf("login died at the SMS prompt: %v", err)
+	}
+	if want := "发送成功: " + tip; asked.Tip != want {
+		t.Errorf("prompter tip = %q, want %q", asked.Tip, want)
 	}
 }
 

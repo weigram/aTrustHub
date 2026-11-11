@@ -28,8 +28,9 @@ func (s *Session) completeTOTP() (authStep, error) {
 			return authStep{}, fmt.Errorf("generate TOTP token: %w", err)
 		}
 	} else {
-		log.Print("Please enter the TOTP token: ")
-		if _, err := fmt.Scanln(&token); err != nil {
+		var err error
+		token, err = s.askCode(CodeRequest{Kind: CodeTOTP})
+		if err != nil {
 			return authStep{}, err
 		}
 	}
@@ -46,9 +47,8 @@ func (s *Session) completeTOTP() (authStep, error) {
 }
 
 func (s *Session) completeRadius(service string) (authStep, error) {
-	log.Print("Please enter the RADIUS token: ")
-	token := ""
-	if _, err := fmt.Scanln(&token); err != nil {
+	token, err := s.askCode(CodeRequest{Kind: CodeRADIUS})
+	if err != nil {
 		return authStep{}, err
 	}
 

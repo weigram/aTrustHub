@@ -17,10 +17,9 @@ func (s *Session) completeCustomSMS() (authStep, error) {
 		return authStep{}, err
 	}
 
-	code := ""
 	log.Println("Tips: Add prefix '$' to sms code to skip secondary authentication")
-	log.Print("Please enter the SMS verification code: ")
-	if _, err := fmt.Scanln(&code); err != nil {
+	code, err := s.askCode(CodeRequest{Kind: CodeCustomSMS, Tip: s.lastTip})
+	if err != nil {
 		return authStep{}, err
 	}
 
@@ -80,6 +79,7 @@ func (s *Session) sendCustomSMS() error {
 	}
 
 	log.Printf("%s: %s", result.Message, result.Data.Tips)
+	s.lastTip = result.Message + ": " + result.Data.Tips
 	return nil
 }
 
