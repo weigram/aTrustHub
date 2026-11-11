@@ -607,7 +607,16 @@ func (a *app) credentials(id string) (vpn.Credentials, error) {
 	if err != nil && !errors.Is(err, store.ErrSecretNotFound) {
 		return vpn.Credentials{}, err
 	}
-	return vpn.Credentials{Login: cred, TOTP: totp, ExternalLogin: external}, nil
+	name := id
+	if point != nil && point.Name != "" {
+		name = point.Name
+	}
+	return vpn.Credentials{
+		Login: cred, TOTP: totp, ExternalLogin: external,
+		PromptCode: func(ctx context.Context, req vpn.CodeRequest) (string, error) {
+			return a.askLoginCode(ctx, name, req)
+		},
+	}, nil
 }
 
 func (a *app) hasPassword(id string) bool {

@@ -76,6 +76,9 @@ func TestPasswordCredentials(t *testing.T) {
 	if creds.ExternalLogin != nil {
 		t.Error("password point got an external login")
 	}
+	if creds.PromptCode == nil {
+		t.Error("password point cannot ask for a login code")
+	}
 }
 
 func TestExternalLoginMessage(t *testing.T) {
