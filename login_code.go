@@ -2,36 +2,65 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"strings"
 	"time"
 
 	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/ui"
 
 	"github.com/qy/easyconnect/internal/vpn"
 )
 
-// codeProbe reads the field and the submit flag in one poll.
-const codeProbe = `(function(){
-  var b = document.getElementById('code');
-  return JSON.stringify([b ? b.value : '', window.__go ? 1 : 0]);
-})()`
+// codePrompt is the window that asks for a one-time code: an SMS code, a
+// dynamic password, a RADIUS token. Every field is written on the main thread
+// (the view and its input handlers run there), so it needs no lock.
+type codePrompt struct {
+	label  string
+	hint   string
+	value  string
+	errMsg string
+	// focus is the control wanted focused; FocusBind writes the actual focus
+	// back here, so a refused submit can put it back on the field.
+	focus  string
+	submit func(code string)
+}
 
-func parseCodeProbe(raw any) (value string, submitted bool) {
-	s, ok := raw.(string)
-	if !ok || s == "" {
-		return "", false
+func (p *codePrompt) view(c *ui.Context) {
+	t := c.Theme()
+	ui.Column(c).Fill().Padding(18).Gap(10).Children(func() {
+		ui.Text(c, p.label).FontSize(16).Bold()
+		ui.Text(c, p.hint).FontSize(12).TextColor(t.TextMuted).Wrap()
+		in := ui.TextInput(c, &p.value)
+		in.AutoFocus().FocusBind(&p.focus, "code")
+		in.OnSubmit(func() { p.accept(c) })
+		if p.errMsg != "" {
+			ui.Text(c, p.errMsg).FontSize(11).TextColor(t.Danger)
+		}
+		ui.Spacer(c)
+		ui.Row(c).Justify(ui.End).Children(func() {
+			if ui.PrimaryButton(c, "确定").Clicked() {
+				p.accept(c)
+			}
+		})
+	})
+}
+
+func (p *codePrompt) accept(c *ui.Context) {
+	code := strings.TrimSpace(p.value)
+	if code == "" {
+		p.errMsg = "请输入验证码"
+		p.focus = "code"
+		c.Invalidate()
+		return
 	}
-	var parts []any
-	if err := json.Unmarshal([]byte(s), &parts); err != nil || len(parts) != 2 {
-		return "", false
+	if p.submit == nil {
+		return
 	}
-	value, _ = parts[0].(string)
-	n, _ := parts[1].(float64)
-	return value, n == 1
+	submit := p.submit
+	p.submit = nil
+	submit(code)
 }
 
 func (a *app) askLoginCode(ctx context.Context, pointName string, req vpn.CodeRequest) (string, error) {
@@ -41,6 +70,14 @@ func (a *app) askLoginCode(ctx context.Context, pointName string, req vpn.CodeRe
 	// 不占 externalLogin 的登录窗口互斥量：验证码窗口只开几秒，排在一个
 	// 可能开着几分钟的扫码窗口后面，只会让登录看起来卡住。
 	label, hint := codePromptText(req)
+	answer := make(chan string, 1)
+	prompt := &codePrompt{label: label, hint: hint, focus: "code"}
+	prompt.submit = func(code string) {
+		select {
+		case answer <- code:
+		default:
+		}
+	}
 	win := mygo.NewWindow(mygo.WindowOptions{
 		Title:           label + " — " + pointName,
 		Width:           440,
@@ -49,86 +86,33 @@ func (a *app) askLoginCode(ctx context.Context, pointName string, req vpn.CodeRe
 		MinHeight:       240,
 		MaxWidth:        620,
 		MaxHeight:       460,
-		URL:             "about:blank",
 		BackgroundColor: "light-dark(#ffffff, #1e1e1e)",
-		Page:            mygo.PageOptions{DevTools: mygo.DevToolsEnabled},
+		Content:         ui.View(prompt.view),
 	})
 	if win.IsDestroyed() {
 		return "", errors.New("打不开验证码窗口")
 	}
-	page := win.Page()
-	if page == nil {
-		win.Close()
-		return "", errors.New("验证码窗口没有网页")
-	}
 	if a.bus != nil {
 		a.bus.Add("app", fmt.Sprintf("[%s] 等待%s", pointName, label))
 	}
-	page.LoadHTML(codePromptHTML(label, hint), "")
-	win.Show()
-	win.Focus()
-
-	type answer struct {
-		code string
-		err  error
-	}
-	// 一个回答就走人：谁先送到算谁的，后来的丢掉。关窗口只能发生在这
-	// 之后——mygo 的 Close 会在调用线程上同步跑 OnClose，在 Once 里面关
-	// 窗口会和 OnClose 里的 Once 互等。
-	result := make(chan answer, 1)
-	post := func(code string, err error) {
+	// 关窗只发一个信号，窗口在这之后由本函数关闭——mygo 的 Close 会在
+	// 调用线程上同步跑 OnClose，在回调里关窗会和回调互等。
+	closed := make(chan struct{}, 1)
+	win.OnClose(func(e *mygo.CloseEvent) {
 		select {
-		case result <- answer{code: code, err: err}:
+		case closed <- struct{}{}:
 		default:
 		}
-	}
-	win.OnClose(func(e *mygo.CloseEvent) {
-		post("", errors.New("已取消输入验证码"))
 	})
-
-	stop := make(chan struct{})
-	defer close(stop)
+	win.Show()
+	win.Focus()
 	defer win.Close()
 
-	go func() {
-		ticker := time.NewTicker(250 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-ctx.Done():
-				post("", ctx.Err())
-				return
-			case <-ticker.C:
-			}
-			evalCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-			raw, err := page.EvalContext(evalCtx, codeProbe)
-			cancel()
-			if err != nil {
-				continue
-			}
-			value, submitted := parseCodeProbe(raw)
-			if !submitted {
-				continue
-			}
-			value = strings.TrimSpace(value)
-			if value == "" {
-				msg, _ := json.Marshal("请输入验证码")
-				evalCtx2, cancel2 := context.WithTimeout(ctx, 2*time.Second)
-				_, _ = page.EvalContext(evalCtx2,
-					`(function(){var e=document.getElementById('err');if(e){e.textContent=`+string(msg)+`;}window.__go=0;})()`)
-				cancel2()
-				continue
-			}
-			post(value, nil)
-			return
-		}
-	}()
-
 	select {
-	case res := <-result:
-		return res.code, res.err
+	case code := <-answer:
+		return code, nil
+	case <-closed:
+		return "", errors.New("已取消输入验证码")
 	case <-time.After(5 * time.Minute):
 		return "", errors.New("验证码输入超时，请重新登录")
 	case <-ctx.Done():
@@ -156,27 +140,4 @@ func codePromptText(req vpn.CodeRequest) (label, hint string) {
 		hint = "请输入令牌"
 	}
 	return label, hint
-}
-
-func codePromptHTML(label, hint string) string {
-	esc := html.EscapeString
-	return `<!doctype html><html><head><meta charset="utf-8">` +
-		`<style>html,body{height:100%}` +
-		`body{margin:0;padding:16px 18px;box-sizing:border-box;display:flex;flex-direction:column;` +
-		`font:14px -apple-system,system-ui,sans-serif;color:#1f2328;background:#fff}` +
-		`h1{font-size:16px;margin:0 0 8px}` +
-		`p{flex:0 1 auto;font-size:13px;line-height:1.6;color:#4a5260;margin:0 0 6px;min-height:2.2em;overflow-y:auto}` +
-		`input{flex:none;width:100%;box-sizing:border-box;padding:8px;font-size:14px;border:1px solid #d0d5dd;border-radius:8px}` +
-		`input:focus{outline:0;border-color:#1f6feb;box-shadow:0 0 0 3px rgba(31,111,235,.18)}` +
-		`#err{flex:none;color:#c62828;font-size:12px;min-height:16px;margin-top:6px}` +
-		`button{flex:none;margin:auto 0 0 auto;padding:7px 16px;font-size:13px;border:0;border-radius:8px;` +
-		`background:#1f6feb;color:#fff;align-self:flex-end}</style></head><body>` +
-		`<h1>` + esc(label) + `</h1>` +
-		`<p>` + esc(hint) + `</p>` +
-		`<input id="code" autocomplete="one-time-code" spellcheck="false" autofocus>` +
-		`<div id="err"></div>` +
-		`<button onclick="window.__go=1">确定</button>` +
-		`<script>document.getElementById('code').addEventListener('keydown',function(e){` +
-		`if(e.key==='Enter'){window.__go=1;}});</script>` +
-		`</body></html>`
 }

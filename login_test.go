@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/egoist/mygo/ui"
+
 	"github.com/qy/easyconnect/internal/model"
 )
 
@@ -293,13 +295,35 @@ func TestCallbackFromURLTakesTicketAndCode(t *testing.T) {
 }
 
 
-func TestParsePasteProbe(t *testing.T) {
-	href, text := parsePasteProbe(`["https://a.net/x#devtools","https://a.net/passport/v1/auth/cas?ticket=1"]`)
-	if !strings.Contains(href, "#devtools") || !strings.HasPrefix(text, "https://") {
-		t.Fatalf("href=%q text=%q", href, text)
+func TestPastePromptRejectsForeignAddress(t *testing.T) {
+	var got string
+	p := &pastePrompt{intro: "在浏览器里登录", loginURL: "https://a.example.net/portal/", server: "a.example.net"}
+	p.submit = func(callback string) { got = callback }
+
+	tt := ui.NewTester(p.view, 620, 400)
+	tt.Type("https://evil.example.org/passport/v1/auth/cas?ticket=1")
+	tt.Key(0, ui.KeyEnter)
+	if got != "" {
+		t.Fatalf("别的服务器的地址不该提交：%q", got)
 	}
-	if h, x := parsePasteProbe("nope"); h != "" || x != "" {
-		t.Fatal("坏输入应返回空")
+	if !strings.Contains(strings.Join(tt.Texts(), "|"), "地址不对") {
+		t.Errorf("没有说明地址不对；texts = %s", strings.Join(tt.Texts(), "|"))
+	}
+}
+
+func TestPastePromptSubmitsOwnCallback(t *testing.T) {
+	var got string
+	p := &pastePrompt{intro: "在浏览器里登录", loginURL: "https://a.example.net/portal/", server: "a.example.net"}
+	p.submit = func(callback string) { got = callback }
+
+	tt := ui.NewTester(p.view, 620, 400)
+	want := "https://a.example.net/passport/v1/auth/cas?ticket=1"
+	tt.Type(want)
+	if err := tt.Click("确定"); err != nil {
+		t.Fatalf("点确定：%v", err)
+	}
+	if got != want {
+		t.Fatalf("提交 = %q，想要 %q", got, want)
 	}
 }
 

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -170,14 +169,15 @@ func (a *app) externalLogin(ctx context.Context, pointName, server, loginURL str
 		}
 	}
 	// finish runs on the main thread, from a navigation callback or a
-	// close.
+	// close. The window is closed after the Once returns: mygo runs OnClose
+	// synchronously inside Close, and that handler enters the same Once.
 	finish := func(callback string, err error) {
 		logLine("登录窗口完成：callback=%v err=%v", callback != "", err)
 		once.Do(func() {
 			result <- loginResult{callback: callback, err: err}
 			close(done)
-			loginWin.Close()
 		})
+		loginWin.Close()
 	}
 
 	// startPasteLogin opens the page in the system browser, where the
@@ -186,45 +186,15 @@ func (a *app) externalLogin(ctx context.Context, pointName, server, loginURL str
 	startPasteLogin := func() {
 		logLine("证书不被内置浏览器接受，改用系统浏览器登录")
 		target := currentTarget()
-		if err := mygo.Shell.OpenExternal(target); err != nil {
-			logLine("打开浏览器失败：%v", err)
-		}
-		page.LoadHTML(pasteLoginHTML("需要你在浏览器里登录 — "+pointName,
-			"这个服务器的证书浏览器内核不接受，已改用系统浏览器打开登录页。", target), "")
 		go func() {
-			ticker := time.NewTicker(700 * time.Millisecond)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-done:
-					return
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-				}
-				evalCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-				raw, err := page.EvalContext(evalCtx,
-					`(function(){var b=document.getElementById('cb');return b?b.value:'';})()`)
-				cancel()
-				if err != nil {
-					continue
-				}
-				text, _ := raw.(string)
-				text = strings.TrimSpace(text)
-				if text == "" {
-					continue
-				}
-				if callbackFromURLAllowed(text, server) {
-					finish(text, nil)
-					return
-				}
-				// Keep the typed text, but show why it was refused.
-				quoted, _ := json.Marshal("地址不对：需要以 https://" + server + "/passport/v1/auth/ 开头的回调地址")
-				evalCtx2, cancel2 := context.WithTimeout(ctx, 2*time.Second)
-				_, _ = page.EvalContext(evalCtx2,
-					`(function(){var e=document.getElementById('err');if(e){e.textContent=`+string(quoted)+`;}})()`)
-				cancel2()
-			}
+			// The portal page cannot be used here, so its window goes away
+			// rather than sitting blank behind the one that asks for the
+			// address.
+			loginWin.Hide()
+			callback, err := a.pasteLoginWindow(ctx, pointName, server, target,
+				"需要你在浏览器里登录 — "+pointName,
+				"这个服务器的证书浏览器内核不接受，已改用系统浏览器打开登录页。")
+			finish(callback, err)
 		}()
 	}
 
@@ -534,26 +504,6 @@ func identityProviderURL(ctx context.Context, loginURL, server string) string {
 	return loc
 }
 
-// pasteProbe returns the page address and what was typed into the callback
-// field, so one poll covers both the shortcut and the address.
-const pasteProbe = `(function(){
-  var b = document.getElementById('cb');
-  return JSON.stringify([location.href, b ? b.value : '']);
-})()`
-
-// parsePasteProbe reads what pasteProbe returned.
-func parsePasteProbe(raw any) (href, text string) {
-	s, ok := raw.(string)
-	if !ok || s == "" {
-		return "", ""
-	}
-	var parts []string
-	if err := json.Unmarshal([]byte(s), &parts); err != nil || len(parts) != 2 {
-		return "", ""
-	}
-	return parts[0], parts[1]
-}
-
 // hostSet is the set of hosts one login window has reached.
 type hostSet struct {
 	mu    sync.Mutex
@@ -614,27 +564,6 @@ func isCertificateFailure(description string) bool {
 	d := strings.ToLower(description)
 	return strings.Contains(d, "ssl") || strings.Contains(d, "certificate") ||
 		strings.Contains(d, "证书") || strings.Contains(d, "tls")
-}
-
-// pasteLoginHTML is the page shown when the login has to happen in the system
-// browser: it explains what to copy and where from.
-func pasteLoginHTML(title, intro, loginURL string) string {
-	esc := html.EscapeString
-	return `<!doctype html><html><head><meta charset="utf-8">` +
-		`<style>body{font:14px -apple-system,system-ui,sans-serif;padding:18px;color:#1f2328;background:#fff}` +
-		`h1{font-size:16px;margin:0 0 10px}p{font-size:13px;line-height:1.6;color:#4a5260;margin:8px 0}` +
-		`code{font-family:ui-monospace,monospace;font-size:12px;background:#f2f3f5;padding:1px 4px;border-radius:4px;word-break:break-all}` +
-		`input{width:100%;box-sizing:border-box;padding:8px;font-size:12px;border:1px solid #d0d5dd;border-radius:8px;margin-top:6px}` +
-		`#err{color:#c62828;font-size:12px;min-height:16px;margin-top:6px}</style></head><body>` +
-		`<h1>` + esc(title) + `</h1>` +
-		`<p>` + esc(intro) + `</p>` +
-		`<p>1. 在浏览器里完成登录；<br>2. 登录成功后地址栏会跳到 <code>https://&lt;服务器&gt;/passport/v1/auth/…</code>；<br>` +
-		`3. 把那一整条地址复制下来，粘贴到下面。</p>` +
-		`<p>如果地址已经跳走了：在浏览器里再打开一次上面的登录页（登录状态还在），` +
-		`地址栏会立刻重新出现带 ticket 的地址；或者在浏览器历史记录里搜索 <code>auth/cas</code> 找到它。</p>` +
-		`<p>登录页：<code>` + esc(loginURL) + `</code></p>` +
-		`<input id="cb" placeholder="粘贴 https://…/passport/v1/auth/… 开头的地址" spellcheck="false">` +
-		`<div id="err"></div></body></html>`
 }
 
 // isCASLoginURL reports whether the login page is the CAS entry point, which
@@ -896,104 +825,7 @@ func callbackFromURLAllowed(rawURL, server string) bool {
 // over, and the callback address the identity provider ends on is pasted back.
 // It is the reliable path for portals whose page only works in a real browser.
 func (a *app) browserLogin(ctx context.Context, pointName, server, loginURL string) (string, error) {
-	logLine := func(format string, args ...any) {
-		if a.bus != nil {
-			a.bus.Add("app", fmt.Sprintf("[%s] ", pointName)+fmt.Sprintf(format, args...))
-		}
-	}
-	win := mygo.NewWindow(mygo.WindowOptions{
-		Title:           "浏览器登录 — " + pointName,
-		Width:           640,
-		Height:          420,
-		MinWidth:        480,
-		MinHeight:       320,
-		URL:             "about:blank",
-		BackgroundColor: "light-dark(#ffffff, #1e1e1e)",
-		Page: mygo.PageOptions{DevTools: mygo.DevToolsEnabled},
-	})
-	if win.IsDestroyed() {
-		return "", errors.New("打不开登录窗口")
-	}
-	page := win.Page()
-	if page == nil {
-		win.Close()
-		return "", errors.New("登录窗口没有网页")
-	}
-	logLine("用系统浏览器打开登录页：%s", loginPageForLog(loginURL))
-	if err := mygo.Shell.OpenExternal(loginURL); err != nil {
-		logLine("打开浏览器失败：%v", err)
-	}
-	page.LoadHTML(pasteLoginHTML("在浏览器里登录 — "+pointName,
-		"已用系统浏览器打开登录页，在那边登录即可。", loginURL), "")
-	win.Show()
-	win.Focus()
-
-	result := make(chan string, 1)
-	done := make(chan struct{})
-	var once sync.Once
-	finish := func(callback string, err error) {
-		once.Do(func() {
-			if err != nil {
-				logLine("浏览器登录未完成：%v", err)
-			}
-			result <- callback
-			close(done)
-			win.Close()
-		})
-	}
-	win.OnClose(func(e *mygo.CloseEvent) {
-		once.Do(func() {
-			result <- ""
-			close(done)
-		})
-	})
-
-	go func() {
-		ticker := time.NewTicker(700 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ctx.Done():
-				finish("", ctx.Err())
-				return
-			case <-ticker.C:
-			}
-			evalCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-			raw, err := page.EvalContext(evalCtx, pasteProbe)
-			cancel()
-			if err != nil {
-				continue
-			}
-			_, text := parsePasteProbe(raw)
-			text = strings.TrimSpace(text)
-			if !strings.HasPrefix(text, "https://") {
-				continue
-			}
-			if callbackFromURLAllowed(text, server) {
-				logLine("已收到回调地址")
-				finish(text, nil)
-				return
-			}
-			msg, _ := json.Marshal("地址不对：需要 https://" + server + "/passport/v1/auth/ 开头的回调地址")
-			evalCtx2, cancel2 := context.WithTimeout(ctx, 2*time.Second)
-			_, _ = page.EvalContext(evalCtx2,
-				`(function(){var e=document.getElementById('err');if(e){e.textContent=`+string(msg)+`;}})()`)
-			cancel2()
-		}
-	}()
-
-	select {
-	case cb := <-result:
-		if cb == "" {
-			return "", errLoginCanceled
-		}
-		return cb, nil
-	case <-time.After(10 * time.Minute):
-		finish("", errors.New("登录超时"))
-		return "", errors.New("登录超时")
-	case <-ctx.Done():
-		return "", ctx.Err()
-	}
+	return a.pasteLoginWindow(ctx, pointName, server, loginURL,
+		"浏览器登录 — "+pointName,
+		"已用系统浏览器打开登录页，在那边登录即可。")
 }

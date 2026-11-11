@@ -2,11 +2,9 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -14,8 +12,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-
-	"github.com/egoist/mygo"
 )
 
 var settingsPattern = regexp.MustCompile(`(?s)window\.settings\s*=\s*(\{.*?\});`)
@@ -76,152 +72,6 @@ func fetchQyWechat(ctx context.Context, loginURL string) (qyWechatSettings, []by
 		return qyWechatSettings{}, nil, fmt.Errorf("二维码图片返回 %d", resp.StatusCode)
 	}
 	return settings, img, nil
-}
-
-// wecomStaticHTML builds a script-free page that shows one QR image. There is
-// no JavaScript, no external resource and no polling in the page: the login
-// is driven entirely from Go, so the WebView can never freeze on the page's
-// own scripts.
-func wecomStaticHTML(title, instruction string, png []byte, showLocalBtn bool) string {
-	b64 := base64.StdEncoding.EncodeToString(png)
-	btn := ""
-	if showLocalBtn {
-		// 每次点击写一个不同的 hash：下面的看门狗拿它和上一次比，才能把
-		// 「再点一次」和「上一次点击」分开。
-		btn = `<a id="local" href="#local" onclick="try{location.hash='local-'+(new Date().getTime())}catch(e){};return false;">本地企业微信认证</a>`
-	}
-	return `<!doctype html><html><head><meta charset="utf-8">` +
-		`<style>` +
-		`html,body{margin:0;height:100%;}` +
-		`body{display:flex;align-items:center;justify-content:center;` +
-		`font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;` +
-		`background:#fff;color:#222;}` +
-		`.wrap{display:flex;flex-direction:column;align-items:center;gap:14px;padding:24px;}` +
-		`h1{font-size:16px;font-weight:600;margin:0;}` +
-		`img{width:240px;height:240px;image-rendering:pixelated;border:1px solid #eee;border-radius:8px;}` +
-		`p{font-size:12px;line-height:1.6;color:#666;margin:0;text-align:center;max-width:300px;}` +
-		`#local{display:inline-block;margin-top:6px;padding:9px 18px;border-radius:8px;` +
-		`background:#1769e0;color:#fff;font-size:13px;text-decoration:none;cursor:pointer;}` +
-		`#local:hover{background:#1257bd;}` +
-		`</style></head><body><div class="wrap">` +
-		`<h1>` + html.EscapeString(title) + `</h1>` +
-		`<img alt="二维码" src="data:image/png;base64,` + b64 + `">` +
-		`<p>` + html.EscapeString(instruction) + `</p>` +
-		btn +
-		`</div></body></html>`
-}
-
-// openStaticQRWindow shows png in a small WebView that loads only the static
-// page above, then blocks until done() fires (login finished elsewhere), the
-// user closes the window, or ctx ends. When showLocalBtn is set, the page
-// shows a "本地企业微信认证" button that, clicked, calls onLocalLogin (the
-// desktop quick-login path). The window itself never reports the login
-// result; the caller's poller does.
-func openStaticQRWindow(ctx context.Context, title, instruction string, png []byte, showLocalBtn bool, onLocalLogin func(say func(string)), done <-chan struct{}, onClose func()) error {
-	win := mygo.NewWindow(mygo.WindowOptions{
-		Title:           title,
-		Width:           360,
-		Height:          500,
-		MinWidth:        300,
-		MinHeight:       420,
-		URL:             "about:blank",
-		BackgroundColor: "light-dark(#ffffff, #ffffff)",
-	})
-	if win.IsDestroyed() {
-		return errors.New("打不开二维码窗口")
-	}
-	page := win.Page()
-	if page == nil {
-		win.Close()
-		return errors.New("二维码窗口没有网页")
-	}
-	// say rewrites the instruction line, so a click always ends with a visible
-	// answer instead of looking like nothing happened.
-	say := func(msg string) {
-		if page == nil {
-			return
-		}
-		quoted, err := json.Marshal(msg)
-		if err != nil {
-			return
-		}
-		evalCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_, _ = page.EvalContext(evalCtx,
-			`(function(){var p=document.querySelector('p');if(p){p.textContent=`+string(quoted)+`;}})()`)
-	}
-
-	var closed bool
-	closedCh := make(chan struct{})
-	win.OnClose(func(e *mygo.CloseEvent) {
-		if !closed {
-			closed = true
-			if onClose != nil {
-				onClose()
-			}
-			close(closedCh)
-		}
-	})
-	page.OnWillNavigate(func(e *mygo.NavigateEvent) {
-		if strings.HasPrefix(e.URL, "wwlocal://") {
-			e.PreventDefault()
-			if onLocalLogin != nil {
-				go onLocalLogin(say)
-			}
-		}
-	})
-	page.LoadHTML(wecomStaticHTML(title, instruction, png, showLocalBtn), "")
-	// Activate the app first: a new window created while the app is in the
-	// background can open behind other apps, which looks like nothing happened.
-	mygo.App.Focus()
-	win.Show()
-	win.Focus()
-
-	// Watch for the "本地企业微信认证" button. Every click writes a fresh
-	// "#local-<时间戳>", so one attempt is told from the next: a fixed
-	// "#local" would make the button work only once per window. Polling that
-	// tiny string is negligible on this script-free page and cannot freeze
-	// the app, so a failed attempt can be retried without closing the window.
-	if showLocalBtn && onLocalLogin != nil {
-		go func() {
-			ticker := time.NewTicker(700 * time.Millisecond)
-			defer ticker.Stop()
-			last := ""
-			for {
-				select {
-				case <-done:
-					return
-				case <-closedCh:
-					return
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-				}
-				evalCtx, c := context.WithTimeout(ctx, 2*time.Second)
-				raw, err := page.EvalContext(evalCtx, "location.hash")
-				c()
-				if err != nil {
-					continue
-				}
-				token, ok := clickToken(raw)
-				if !ok || token == last {
-					continue
-				}
-				last = token
-				go onLocalLogin(say)
-			}
-		}()
-	}
-
-	select {
-	case <-done:
-		win.Close()
-	case <-closedCh:
-		// The user closed the window.
-	case <-ctx.Done():
-		win.Close()
-	}
-	return nil
 }
 
 // wecomStaticQRLogin runs WeCom's new web login without ever loading its
@@ -543,20 +393,4 @@ func (a *app) pollQyWechatStatic(ctx context.Context, pointName, server string, 
 		logLine("手机已确认，收到扫码回调")
 		return callback, nil
 	}
-}
-
-// clickToken reports whether the page's location.hash is a click of the
-// "本地企业微信认证" button and returns that click's token. Each click writes a
-// fresh "#local-<时间戳>", which is what lets the watcher tell a new attempt
-// from the one it already handled.
-func clickToken(raw any) (string, bool) {
-	s, ok := raw.(string)
-	if !ok {
-		return "", false
-	}
-	s = strings.TrimPrefix(strings.TrimSpace(s), "#")
-	if !strings.HasPrefix(s, "local-") || len(s) <= len("local-") {
-		return "", false
-	}
-	return s, true
 }

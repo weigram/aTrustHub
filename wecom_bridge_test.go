@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"image"
+	"image/png"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/egoist/mygo/ui"
 )
 
 // stubWeComBridge answers like the desktop client's local bridge: it wants a
@@ -225,28 +230,53 @@ func TestBridgeBindWithoutTarget(t *testing.T) {
 	}
 }
 
-func TestClickToken(t *testing.T) {
-	cases := []struct {
-		in    any
-		token string
-		ok    bool
-	}{
-		{"#local-1699999999", "local-1699999999", true},
-		{"#local-1", "local-1", true},
-		{"#browser-1699999999", "", false},
-		{"", "", false},
-		{"#local", "", false},
-		{"#local-", "", false},
-		{"#other", "", false},
-		{nil, "", false},
-		{42, "", false},
+func TestQRPromptShowsOneEntry(t *testing.T) {
+	img, err := ui.DecodeBitmap(testQRPNG(t))
+	if err != nil {
+		t.Fatalf("解不出测试二维码：%v", err)
 	}
-	for _, c := range cases {
-		token, ok := clickToken(c.in)
-		if ok != c.ok || token != c.token {
-			t.Fatalf("clickToken(%v) = (%q,%v)，想要 (%q,%v)", c.in, token, ok, c.token, c.ok)
+	called := make(chan string, 1)
+	p := &qrPrompt{title: "企业微信扫码登录 — 测试", img: img, instruction: "用手机企业微信扫一扫二维码登录", showLocal: true}
+	p.local = func() { called <- "local" }
+
+	tt := ui.NewTester(p.view, 340, 480)
+	texts := strings.Join(tt.Texts(), "|")
+	for _, want := range []string{"企业微信扫码登录 — 测试", "用手机企业微信扫一扫二维码登录"} {
+		if !strings.Contains(texts, want) {
+			t.Errorf("窗口缺少 %q；texts = %s", want, texts)
 		}
 	}
+	if err := tt.Click("本地企业微信认证"); err != nil {
+		t.Fatalf("本地认证按钮：%v", err)
+	}
+	if got := <-called; got != "local" {
+		t.Fatalf("按钮点了 = %q", got)
+	}
+
+	// 说明行可以改：点过之后失败的提示要显示在同一个窗口里。
+	p.say("正在查找电脑版企业微信…")
+	tt.Frame()
+	if !strings.Contains(strings.Join(tt.Texts(), "|"), "正在查找电脑版企业微信…") {
+		t.Errorf("说明没有更新；texts = %s", strings.Join(tt.Texts(), "|"))
+	}
+
+	// 没有本地认证时，窗口里不该有那个按钮。
+	plain := &qrPrompt{title: "标题", img: img, instruction: "说明"}
+	pt := ui.NewTester(plain.view, 340, 480)
+	if pt.HasText("本地企业微信认证") {
+		t.Fatal("不需要入口时不该出现按钮")
+	}
+}
+
+// testQRPNG builds a 3x3 gray PNG, enough for the image element to show.
+func testQRPNG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewGray(image.Rect(0, 0, 3, 3))
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("编码测试二维码：%v", err)
+	}
+	return buf.Bytes()
 }
 
 func TestDedupePorts(t *testing.T) {
@@ -445,21 +475,5 @@ func TestBridgeTargetsOrderAndSweep(t *testing.T) {
 	}
 	if !sawHTTP {
 		t.Fatal("http 端口族没有被列入候选")
-	}
-}
-
-// 页面只保留一个入口：失败后自动交给浏览器，不再让用户点第二次。
-func TestWeComStaticHTMLEntries(t *testing.T) {
-	png := []byte{0x89, 0x50, 0x4e, 0x47}
-	page := wecomStaticHTML("标题", "说明", png, true)
-	if !strings.Contains(page, `id="local"`) {
-		t.Fatal("缺少本地认证入口")
-	}
-	if strings.Contains(page, `id="browser"`) || strings.Contains(page, "改用浏览器") {
-		t.Fatal("不应再有浏览器按钮")
-	}
-	plain := wecomStaticHTML("标题", "说明", png, false)
-	if strings.Contains(plain, `id="local"`) {
-		t.Fatal("不需要入口时不该出现按钮")
 	}
 }
