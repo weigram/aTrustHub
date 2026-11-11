@@ -43,10 +43,12 @@ func (a *app) askLoginCode(ctx context.Context, pointName string, req vpn.CodeRe
 	label, hint := codePromptText(req)
 	win := mygo.NewWindow(mygo.WindowOptions{
 		Title:           label + " — " + pointName,
-		Width:           420,
-		Height:          260,
-		MinWidth:        360,
-		MinHeight:       220,
+		Width:           440,
+		Height:          250,
+		MinWidth:        380,
+		MinHeight:       240,
+		MaxWidth:        620,
+		MaxHeight:       460,
 		URL:             "about:blank",
 		BackgroundColor: "light-dark(#ffffff, #1e1e1e)",
 		Page:            mygo.PageOptions{DevTools: mygo.DevToolsEnabled},
@@ -159,16 +161,21 @@ func codePromptText(req vpn.CodeRequest) (label, hint string) {
 func codePromptHTML(label, hint string) string {
 	esc := html.EscapeString
 	return `<!doctype html><html><head><meta charset="utf-8">` +
-		`<style>body{font:14px -apple-system,system-ui,sans-serif;padding:18px;color:#1f2328;background:#fff}` +
-		`h1{font-size:16px;margin:0 0 10px}p{font-size:13px;line-height:1.6;color:#4a5260;margin:8px 0}` +
-		`input{width:100%;box-sizing:border-box;padding:8px;font-size:14px;border:1px solid #d0d5dd;border-radius:8px;margin-top:6px}` +
-		`button{margin-top:10px;padding:6px 16px;font-size:13px;border:0;border-radius:8px;background:#1f6feb;color:#fff}` +
-		`#err{color:#c62828;font-size:12px;min-height:16px;margin-top:6px}</style></head><body>` +
+		`<style>html,body{height:100%}` +
+		`body{margin:0;padding:16px 18px;box-sizing:border-box;display:flex;flex-direction:column;` +
+		`font:14px -apple-system,system-ui,sans-serif;color:#1f2328;background:#fff}` +
+		`h1{font-size:16px;margin:0 0 8px}` +
+		`p{flex:0 1 auto;font-size:13px;line-height:1.6;color:#4a5260;margin:0 0 6px;min-height:2.2em;overflow-y:auto}` +
+		`input{flex:none;width:100%;box-sizing:border-box;padding:8px;font-size:14px;border:1px solid #d0d5dd;border-radius:8px}` +
+		`input:focus{outline:0;border-color:#1f6feb;box-shadow:0 0 0 3px rgba(31,111,235,.18)}` +
+		`#err{flex:none;color:#c62828;font-size:12px;min-height:16px;margin-top:6px}` +
+		`button{flex:none;margin:auto 0 0 auto;padding:7px 16px;font-size:13px;border:0;border-radius:8px;` +
+		`background:#1f6feb;color:#fff;align-self:flex-end}</style></head><body>` +
 		`<h1>` + esc(label) + `</h1>` +
 		`<p>` + esc(hint) + `</p>` +
 		`<input id="code" autocomplete="one-time-code" spellcheck="false" autofocus>` +
-		`<button onclick="window.__go=1">确定</button>` +
 		`<div id="err"></div>` +
+		`<button onclick="window.__go=1">确定</button>` +
 		`<script>document.getElementById('code').addEventListener('keydown',function(e){` +
 		`if(e.key==='Enter'){window.__go=1;}});</script>` +
 		`</body></html>`
