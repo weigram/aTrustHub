@@ -95,6 +95,8 @@ type Session struct {
 	deviceID   string
 	username   string
 	totpSecret string
+	promptCode CodePrompter
+	lastTip    string
 
 	baseHost string
 	baseURL  string
@@ -158,6 +160,7 @@ type LoginOptions struct {
 	DeviceID   string
 	Cookies    []Cookie
 	TOTPSecret string
+	PromptCode CodePrompter
 }
 
 type LoginResult struct {
@@ -345,6 +348,7 @@ func (s *Session) Login(method LoginMethod, opts LoginOptions) (LoginResult, err
 
 	s.deviceID = opts.DeviceID
 	s.totpSecret = opts.TOTPSecret
+	s.promptCode = opts.PromptCode
 	s.env = base64.StdEncoding.EncodeToString([]byte(`{"deviceId":"` + opts.DeviceID + `"}`))
 
 	isLogin, authInfoList, err := s.authConfig(false, true)

@@ -511,6 +511,7 @@ func (s *Session) authSms(step authStep) error {
 	}
 
 	log.Printf("%s: %s", re.Message, re.Data.Tips)
+	s.lastTip = re.Message + ": " + re.Data.Tips
 
 	return nil
 }
@@ -518,10 +519,8 @@ func (s *Session) authSms(step authStep) error {
 func (s *Session) smsCheckCode(step authStep) (authStep, error) {
 	log.Println("Perform POST /passport/v1/auth/sms")
 
-	code := ""
 	log.Println("Tips: Add prefix '$' to sms code to skip secondary authentication")
-	log.Print("Please enter the SMS verification code: ")
-	_, err := fmt.Scanln(&code)
+	code, err := s.askCode(CodeRequest{Kind: CodeSMS, Tip: s.lastTip})
 	if err != nil {
 		return authStep{}, err
 	}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	atrustclient "github.com/mythologyli/zju-connect/client/atrust"
+	"github.com/mythologyli/zju-connect/client/atrust/auth"
 	"github.com/mythologyli/zju-connect/dial"
 	zjuLog "github.com/mythologyli/zju-connect/log"
 	"github.com/mythologyli/zju-connect/resolve"
@@ -112,6 +113,13 @@ func connectZJU(ctx context.Context, opts ZJUOptions, point model.AccessPoint, c
 		data []byte
 		err  error
 	}
+	// 登录卡在验证码上时由调用方弹窗询问；没有提供就只能走终端。
+	var promptCode auth.CodePrompter
+	if creds.PromptCode != nil {
+		promptCode = func(req auth.CodeRequest) (string, error) {
+			return creds.PromptCode(ctx, req)
+		}
+	}
 	done := make(chan setupResult, 1)
 	go func() {
 		data, err := client.Setup(atrustclient.SetupOptions{
@@ -119,6 +127,7 @@ func connectZJU(ctx context.Context, opts ZJUOptions, point model.AccessPoint, c
 			ServerPort:               point.Port,
 			LoginMethod:              loginMethod,
 			TOTPSecret:               creds.TOTP,
+			PromptCode:               promptCode,
 			ClientData:               clientData,
 			ResourceData:             resourceData,
 			BestNodesRefreshInterval: 90 * time.Second,
@@ -137,6 +146,7 @@ func connectZJU(ctx context.Context, opts ZJUOptions, point model.AccessPoint, c
 				ServerPort:               point.Port,
 				LoginMethod:              loginMethod,
 				TOTPSecret:               creds.TOTP,
+				PromptCode:               promptCode,
 				ClientData:               clientData,
 				BestNodesRefreshInterval: 90 * time.Second,
 			})
