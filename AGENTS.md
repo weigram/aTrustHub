@@ -89,6 +89,12 @@ git push origin main && git push origin vX.Y.Z
   另一个齿轮图标按钮（端口映射弹窗）、`＋ 添加接入点`。
 - 端口映射弹窗：标题「端口映射」，**右上角并排**「访问日志」(☰) 与「TUN 日志」(📄)；
   每行 `启用开关 | 目标 IP | 端口 → 映射 IP | 端口 | 删除`，支持多条。
+- 主窗口 tab 顺序：`接入点` / `应用 N` / `访问日志` / `分流规则`。第四个 tab **只生成
+  Clash Verge 扩展配置格式**（`clash.go` 的 `generateClashMerge`）：`prepend-proxies` /
+  `prepend-proxy-groups` / `prepend-rules` 三段，可直接粘贴进「全局扩展覆写配置」。
+  每点一个 SOCKS5 代理 + select 组 + 按应用地址生成 `IP-CIDR` / `DOMAIN-SUFFIX` 规则；
+  未登录或无独立 SOCKS5 端口的点只报告、不生成。用 `prepend-` 是为了排在订阅自带
+  的 `MATCH`/`GEOIP` 兜底规则之前。
 - 任何失败都要给用户可见反馈（`a.toast` 或弹窗内 `d.err`），不要静默失败。
 
 ## 7. 验证新构建时的注意

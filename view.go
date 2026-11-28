@@ -75,6 +75,8 @@ func (a *app) view(c *ui.Context) {
 			a.appsSection(c)
 		case 2:
 			a.accessSection(c)
+		case 3:
+			a.clashSection(c)
 		default:
 			// 系统代理没开时，统一入口没有参与任何转发，整块隐藏；
 			// 需要手动配置端口时在「设置」里看。
@@ -100,11 +102,15 @@ func (a *app) view(c *ui.Context) {
 // qrCard was removed: WeCom's QR login now uses a WebView popup.
 
 func (a *app) tabBar(c *ui.Context) {
-	ui.Tabs(c, &a.tab, "接入点", appTabLabel(a.appCount()), accessTabLabel())
+	ui.Tabs(c, &a.tab, "接入点", appTabLabel(a.appCount()), accessTabLabel(), clashTabLabel())
 }
 
 func accessTabLabel() string {
 	return "访问日志"
+}
+
+func clashTabLabel() string {
+	return "分流规则"
 }
 
 func appTabLabel(n int) string {
@@ -1025,6 +1031,58 @@ func (a *app) logPanel(c *ui.Context) {
 					})
 				}
 			})
+		})
+	})
+}
+
+// clashPoints reduces the current views to what the rule generator needs.
+func (a *app) clashPoints() []clashPoint {
+	views := a.mgr.Views()
+	out := make([]clashPoint, 0, len(views))
+	for _, v := range views {
+		out = append(out, clashPoint{
+			Name: v.Name, SocksPort: v.SocksPort,
+			Online: v.State == vpn.StateOnline, Apps: v.Apps,
+		})
+	}
+	return out
+}
+
+// clashSection shows the generated Clash configuration for every access
+// point, ready to paste into a Clash profile.
+func (a *app) clashSection(c *ui.Context) {
+	t := c.Theme()
+	points := a.clashPoints()
+	plan := buildClashPlan(points)
+	yaml := generateClashMerge(points)
+
+	ui.Row(c).AlignItems(ui.Center).Gap(10).Children(func() {
+		ui.Text(c, "分流规则").FontSize(14).Bold()
+		ui.Text(c, fmt.Sprintf("%d 条规则", plan.Rules)).FontSize(12).TextColor(t.TextMuted)
+		ui.Row(c).Grow(1)
+		if ui.Button(c, "复制全部").Clicked() {
+			a.copyText(yaml)
+			a.toast = "已复制，粘贴到 Clash Verge 的「全局扩展覆写配置」后保存"
+		}
+	})
+	if note := clashSkippedNote(plan); note != "" {
+		ui.Text(c, note).FontSize(11).TextColor(t.TextMuted)
+	}
+	box := ui.Scroll(c).Grow(1).MinHeight(0).Radius(8).Border(1, t.Border).
+		Background(t.Surface).Padding(10)
+	box.Children(func() {
+		ui.Column(c).Gap(1).Children(func() {
+			for _, line := range strings.Split(strings.TrimRight(yaml, "\n"), "\n") {
+				color := t.Text
+				trimmed := strings.TrimSpace(line)
+				switch {
+				case strings.HasPrefix(trimmed, "#"):
+					color = t.TextMuted
+				case strings.HasSuffix(trimmed, ":"):
+					color = t.Accent
+				}
+				ui.Text(c, line).Font("monospace").FontSize(11).TextColor(color)
+			}
 		})
 	})
 }
